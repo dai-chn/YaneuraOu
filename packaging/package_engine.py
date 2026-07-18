@@ -52,25 +52,45 @@ def write_engine_name(staging: Path, engine_name: str, author: str) -> None:
     (staging / "engine_name.txt").write_text(f"{engine_name}\n{author}\n", encoding="utf-8")
 
 
+def _render(tmpl_name: str, meta: dict) -> str:
+    text = (TEMPLATES / tmpl_name).read_text(encoding="utf-8")
+    for k, v in meta.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    return text
+
+
+def _copy_gpl(staging: Path) -> None:
+    gpl = Path(__file__).resolve().parents[1] / "Copying.txt"  # YaneuraOu/Copying.txt
+    if gpl.exists():
+        shutil.copy2(gpl, staging / "LICENSE-GPLv3.txt")
+
+
 def write_docs(staging: Path, meta: dict) -> None:
+    """standalone 配布用の docs 一式 (README/MODEL/SOURCE + ライセンス)。"""
     staging.mkdir(parents=True, exist_ok=True)
     # engine_name があれば単一exe用 README、無ければディスパッチャ用 README。
     readme_tmpl = "README-single.txt.tmpl" if meta.get("engine_name") else "README.txt.tmpl"
     for tmpl, out in [(readme_tmpl, "README.txt"),
                       ("MODEL.txt.tmpl", "MODEL.txt"),
                       ("SOURCE.txt.tmpl", "SOURCE.txt")]:
-        text = (TEMPLATES / tmpl).read_text(encoding="utf-8")
-        for k, v in meta.items():
-            text = text.replace("{{" + k + "}}", str(v))
-        (staging / out).write_text(text, encoding="utf-8")
-    # ライセンスを丸ごとコピー (存在すれば)
-    fork = Path(__file__).resolve().parents[1]  # YaneuraOu/
-    gpl = fork / "Copying.txt"
-    if gpl.exists():
-        shutil.copy2(gpl, staging / "LICENSE-GPLv3.txt")
-    bullet_mit = fork.parent / "bullet-shogi" / "LICENSE"
+        (staging / out).write_text(_render(tmpl, meta), encoding="utf-8")
+    _copy_gpl(staging)
+    bullet_mit = Path(__file__).resolve().parents[2] / "bullet-shogi" / "LICENSE"
     if bullet_mit.exists():
         shutil.copy2(bullet_mit, staging / "LICENSE-bullet-MIT.txt")
+
+
+def write_bundle_docs(staging: Path, meta: dict) -> None:
+    """GUI バンドル用の最小 docs: GPLv3 ライセンス + SOURCE + nn.bin NOTICE のみ。
+
+    README/MODEL/bullet-MIT は出さない (使い方は GUI が提供、研究情報は非公開、bullet は
+    配布バイナリに含まれない)。GPLv3 の義務 (ライセンス文 + 対応ソース入手法) だけ残す。
+    """
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "SOURCE.txt").write_text(_render("SOURCE.txt.tmpl", meta), encoding="utf-8")
+    _copy_gpl(staging)
+    if meta.get("nn_notice"):
+        (staging / "NOTICE.txt").write_text(str(meta["nn_notice"]) + "\n", encoding="utf-8")
 
 
 def _git_commit(repo: Path) -> str:
@@ -96,8 +116,10 @@ def _git_commit(repo: Path) -> str:
               help="ディスパッチャ同梱の有無 (既定: target が1個なら no-dispatcher)")
 @click.option("--model-note", default="", help="MODEL.txt に書く強さ等の説明")
 @click.option("--arch-desc", default=None, help="MODEL.txt のアーキ表記 (既定: --arch から導出)")
+@click.option("--bundle", is_flag=True, help="GUI バンドル用の最小構成 (README/MODEL/bullet-MIT を出さず GPLv3+SOURCE+NOTICE のみ)")
+@click.option("--nn-notice", default=None, help="nn.bin の権利表記1行 (--bundle 時 NOTICE.txt に。既定は author から生成)")
 def main(eval_bin, arch, name, version, targets, repo_url, commit_override, out, skip_build,
-         engine_name, author, jp_name, use_dispatcher, model_note, arch_desc):
+         engine_name, author, jp_name, use_dispatcher, model_note, arch_desc, bundle, nn_notice):
     fork = Path(__file__).resolve().parents[1]            # YaneuraOu/
     repo_root = fork.parent
     source_dir = fork / "source"
@@ -133,14 +155,19 @@ def main(eval_bin, arch, name, version, targets, repo_url, commit_override, out,
     if engine_name:
         write_engine_name(staging, engine_name, author)
 
+    if nn_notice is None:
+        nn_notice = f"eval/nn.bin (c) {author} — 独立したデータであり、エンジン本体 (GPLv3) とは別です。"
     meta = {
         "name": name, "version": version,
         "model": Path(eval_bin).parent.name,
         "engine_name": engine_name or "", "jp_name": jp_name,
-        "model_note": model_note, "arch_desc": arch_desc,
+        "model_note": model_note, "arch_desc": arch_desc, "nn_notice": nn_notice,
         "repo_url": repo_url, "commit": commit_override or _git_commit(fork), "arch": arch,
     }
-    write_docs(staging, meta)
+    if bundle:
+        write_bundle_docs(staging, meta)
+    else:
+        write_docs(staging, meta)
 
     zpath = Path(out) / f"{name}-{version}-win.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
