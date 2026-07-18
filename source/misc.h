@@ -1075,6 +1075,13 @@ namespace Directory
 
 	// 起動時のフォルダを返す。
 	std::string GetBinaryFolder();
+
+	// Windows: 起動フォルダ相対のファイルを wide(UTF-16) API で丸ごと読み込む (非ASCIIパス耐性)。
+	// GetModuleFileNameW でパスを wide 取得するため、ANSI コードページ(例 CP932)で表現できない
+	// 文字を含むパス (韓国語/絵文字/混在スクリプト) でも正しく開ける。成功時 true とデータを out に返す。
+	// 非Windows では常に false (呼び出し側で従来の narrow 経路にフォールバックする)。
+	bool ReadBinaryFolderRelativeFileW(const std::string& dir_name, const std::string& file_name,
+	                                   std::vector<char>& out);
 }
 
 // --------------------

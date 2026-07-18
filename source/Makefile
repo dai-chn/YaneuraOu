@@ -380,7 +380,8 @@ ifeq (,)
 		book/makebook2025.cpp                                                  \
 		learn/learner.cpp                                                      \
 		learn/learning_tools.cpp                                               \
-		learn/multi_think.cpp
+		learn/multi_think.cpp                                                  \
+		learn/filter_quiet.cpp
 endif
 
 ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_KPPT)
@@ -478,6 +479,15 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_16_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_16_32
+
+		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
+			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_32_32
+
+		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_8_64)
+			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_8_64
+
+		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_768X2_8_32)
+			CPPFLAGS += -DEVAL_NNUE_HALFKP_768X2_8_32
 
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_1024X2_8_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_1024X2_8_32

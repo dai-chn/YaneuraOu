@@ -444,6 +444,8 @@ string config_info()
 		"halfkpe9_256x2_32_32";
 	#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_16_32)
 		"halfkp_512x2_16_32";
+	#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_768X2_8_32)
+		"halfkp_768x2_8_32";
 	#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_1024X2_8_32)
 		"halfkp_1024x2_8_32";
 	#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_1024X2_8_64)
@@ -1611,6 +1613,57 @@ namespace Directory
 
 	// 起動時のフォルダを返す。
 	string GetBinaryFolder() { return CommandLine::get_binary_directory(); }
+
+	// Windows: 起動フォルダ相対のファイルを wide(UTF-16) API で丸ごと読み込む (非ASCIIパス耐性)。
+	bool ReadBinaryFolderRelativeFileW(const std::string& dir_name, const std::string& file_name,
+	                                   std::vector<char>& out) {
+#if defined(_WIN32)
+		out.clear();
+		// 実行中バイナリのフォルダ (末尾に区切り付き) を wide で取得。argv[0]/ANSI CP に依存しない。
+		std::wstring folder(32768, L'\0');
+		DWORD n = GetModuleFileNameW(nullptr, &folder[0], (DWORD)folder.size());
+		folder.resize(n);
+		size_t sep = folder.find_last_of(L"\\/");
+		folder = (sep == std::wstring::npos) ? std::wstring(L".\\") : folder.substr(0, sep + 1);
+		// EvalDir / ファイル名は ASCII 前提なので単純に wide 化して連結する。
+		// dir_name が絶対パス (X:\... または \\UNC / 先頭スラッシュ) のときは
+		// 起動フォルダを前置しない。前置すると <exe>\C:\... と二重ドライブレターになり失敗する。
+		std::wstring wdir(dir_name.begin(), dir_name.end());
+		const bool is_abs =
+			(wdir.size() >= 2 && wdir[1] == L':') ||
+			(!wdir.empty() && (wdir[0] == L'\\' || wdir[0] == L'/'));
+		std::wstring wpath = is_abs ? std::wstring() : folder;
+		if (!wdir.empty()) {
+			wpath += wdir;
+			if (wpath.back() != L'\\' && wpath.back() != L'/')
+				wpath += L"\\";
+		}
+		wpath += std::wstring(file_name.begin(), file_name.end());
+
+		HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+		                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (h == INVALID_HANDLE_VALUE)
+			return false;
+		LARGE_INTEGER sz{};
+		if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return false; }
+		out.resize((size_t)sz.QuadPart);
+		size_t off = 0;
+		while (off < out.size()) {
+			size_t remain = out.size() - off;
+			DWORD want = (remain > (1u << 30)) ? (DWORD)(1u << 30) : (DWORD)remain;
+			DWORD got = 0;
+			if (!ReadFile(h, out.data() + off, want, &got, nullptr) || got == 0) {
+				CloseHandle(h); out.clear(); return false;
+			}
+			off += (size_t)got;
+		}
+		CloseHandle(h);
+		return true;
+#else
+		(void)dir_name; (void)file_name; (void)out;
+		return false;
+#endif
+	}
 }
 
 

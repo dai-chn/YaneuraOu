@@ -12,6 +12,29 @@
 #define USE_ELEMENT_WISE_MULTIPLY
 #endif
 
+// NNUE_FT_PAIRWISE (exp013 arm3): 既存の element-wise multiply Transform 経路を流用する。
+// このフラグは line 16 の nnue_architecture.h include より前に見える必要があるため
+// コンパイルフラグ (-DNNUE_FT_PAIRWISE) で渡す (arch ヘッダ内 #define では間に合わない)。
+#if defined(NNUE_FT_PAIRWISE)
+#define USE_ELEMENT_WISE_MULTIPLY
+#endif
+
+// NNUE_FT_SCRELU (exp013 arm1) は classic 経路の AVX2 / scalar のみ実装。
+#if defined(NNUE_FT_SCRELU)
+#if defined(USE_ELEMENT_WISE_MULTIPLY) || defined(USE_AVX512) || defined(USE_MMX) \
+	|| defined(USE_NEON) || (defined(USE_SSE2) && !defined(USE_AVX2))
+#error "NNUE_FT_SCRELU is implemented only for the AVX2 and scalar Transform paths"
+#endif
+#endif
+
+// NNUE_FT_PAIRWISE (exp013 arm3) は element-wise 経路の AVX2 / scalar のみ検証済み。
+#if defined(NNUE_FT_PAIRWISE)
+#if defined(USE_AVX512) || defined(USE_MMX) || defined(USE_NEON) \
+	|| (defined(USE_SSE2) && !defined(USE_AVX2))
+#error "NNUE_FT_PAIRWISE is verified only for the AVX2 and scalar element-wise paths"
+#endif
+#endif
+
 #include "nnue_common.h"
 #include "nnue_architecture.h"
 #include "features/index_list.h"
@@ -156,12 +179,30 @@ class FeatureTransformer {
 	// 順伝播用バッファのサイズ
 	static constexpr std::size_t kBufferSize = kOutputDimensions * sizeof(OutputType);
 
+#if defined(NNUE_FT_SCRELU)
+	// SCReLU ネット識別マーカー。exp013 trainer の SCRELU_HASH_MARKER /
+	// experiments/013-arch-ladder/check_headers.py の MARKER と一致必須。
+	static constexpr std::uint32_t kFtSCReLUHashMarker = 0x5C12E1D;
+#endif
+#if defined(NNUE_FT_PAIRWISE)
+	// pairwise ネット識別マーカー。exp013 trainer の PAIRWISE_HASH_MARKER /
+	// experiments/013-arch-ladder の nnue_eval.py PAIRWISE_HASH_MARKER と一致必須。
+	static constexpr std::uint32_t kFtPairwiseHashMarker = 0x9A1E70;
+#endif
+
 	// Hash value embedded in the evaluation file
 	// 評価関数ファイルに埋め込むハッシュ値
 	static constexpr std::uint32_t GetHashValue() {
 #if defined(SFNNwoPSQT)
 		// 学習部と整合性とるの面倒なのでSFNNwoPSQTのときはこれに固定しておく。
 		return 0x5f134ab8u;
+#elif defined(NNUE_FT_SCRELU)
+		// CReLU ネットとの取り違えをロード時に hash mismatch で検出する。
+		return (RawFeatures::kHashValue ^ kOutputDimensions) ^ kFtSCReLUHashMarker;
+#elif defined(NNUE_FT_PAIRWISE)
+		// CReLU ネットとの取り違えをロード時に hash mismatch で検出する。
+		// kOutputDimensions は USE_ELEMENT_WISE_MULTIPLY 下で kHalfDimensions (256)。
+		return (RawFeatures::kHashValue ^ kOutputDimensions) ^ kFtPairwiseHashMarker;
 #else
 		return RawFeatures::kHashValue ^ kOutputDimensions;
 #endif
@@ -177,7 +218,21 @@ class FeatureTransformer {
 	// Read network parameters
 	// パラメータを読み込む
 	Tools::Result ReadParameters(std::istream& stream) {
-#if defined(USE_ELEMENT_WISE_MULTIPLY)
+#if defined(NNUE_FT_PAIRWISE)
+		// exp013 arm3 pairwise: trainer は SavedFormat::quantise::<i16> = raw little-endian を出力。
+		// SFNNwoPSQT の LEB128 形式とは異なるため、pairwise は標準 CReLU と同じ raw 読み出し。
+		// Transform 経路 (USE_ELEMENT_WISE_MULTIPLY) の AVX2 layout 整合のため permute は必要。
+		// ただし scale_weights(true) (FT 重み×2) は不要: SFNNwoPSQT は FT を half-scale で
+		// export するため×2 で復元するが、exp013 trainer は qa=255 full-scale で export する。
+		// ここで×2 すると acc が 2倍になり、(a*c)>>9 が ~4倍 + clamp254 飽和でネットが壊れる。
+		// nnue_eval.py --verify (意図クオンタイズ: raw weight, clamp254, >>9) で 1:1 一致を確認済み。
+		for (std::size_t i = 0; i < kHalfDimensions; ++i) biases_[i] = read_little_endian<BiasType>(stream);
+		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
+			weights_[i] = read_little_endian<WeightType>(stream);
+#if defined(VECTOR)
+		permute_weights(inverse_order_packs);
+#endif
+#elif defined(USE_ELEMENT_WISE_MULTIPLY)
 		read_leb_128<BiasType>(stream, biases_, kHalfDimensions);
 		read_leb_128<WeightType>(stream, weights_, kHalfDimensions * kInputDimensions);
 
@@ -359,8 +414,20 @@ class FeatureTransformer {
 							sum1,
 							_mm256_loadu_si256(&reinterpret_cast<const __m256i*>(accumulation[perspectives[p]][i])[j * 2 + 1]));
 					}
+#if defined(NNUE_FT_SCRELU)
+					// SCReLU: (clamp(acc,0,127))^2 >> 7。127*127=16129 < 32767 なので
+					// mullo_epi16 で正確。結果 0..126 は packs の飽和に届かない。
+					const __m256i kMax127 = _mm256_set1_epi16(127);
+					sum0 = _mm256_min_epi16(_mm256_max_epi16(sum0, kZero), kMax127);
+					sum1 = _mm256_min_epi16(_mm256_max_epi16(sum1, kZero), kMax127);
+					sum0 = _mm256_srli_epi16(_mm256_mullo_epi16(sum0, sum0), 7);
+					sum1 = _mm256_srli_epi16(_mm256_mullo_epi16(sum1, sum1), 7);
+					_mm256_store_si256(&out[j], _mm256_permute4x64_epi64(
+									 _mm256_packs_epi16(sum0, sum1), kControl));
+#else
 					_mm256_store_si256(&out[j], _mm256_permute4x64_epi64(
 									 _mm256_max_epi8(_mm256_packs_epi16(sum0, sum1), kZero), kControl));
+#endif
 			}
 
 #elif defined(USE_SSE2)
@@ -412,7 +479,12 @@ class FeatureTransformer {
 				for (IndexType i = 1; i < kRefreshTriggers.size(); ++i) {
 					sum += accumulation[perspectives[p]][i][j];
 				}
+#if defined(NNUE_FT_SCRELU)
+				const int s = std::clamp<int>(sum, 0, 127);
+				output[offset + j] = static_cast<OutputType>((s * s) >> 7);
+#else
 				output[offset + j] = static_cast<OutputType>(std::clamp<int>(sum, 0, 127));
+#endif
 			}
 #endif
 		}

@@ -1,0 +1,21 @@
+{{name}} {{version}} — 将棋 USI エンジン (NNUE)
+
+■ 使い方
+1. このフォルダを任意の場所に展開します (ASCII パス推奨。日本語パスでも動作します)。
+2. 将棋GUI (将棋所 / ShogiGUI 等) の「エンジン登録」で {{name}}.exe を指定します。
+   {{name}}.exe が CPU を自動判定し、engine\ 内の最適な SIMD バイナリ (AVX512 / AVX2 / SSE42)
+   を起動します。ユーザーが手動で選ぶ必要はありません。
+3. 評価関数は engine\eval\nn.bin にあります (設定変更不要)。
+
+■ 構成
+  {{name}}.exe        … CPU自動判定ランチャ (これをGUIに登録)
+  engine\YaneuraOu-*  … SIMD 別のエンジン本体 (AVX512 / AVX2 / SSE42)
+  engine\eval\nn.bin  … 評価関数 ({{model}})
+
+■ 動作環境
+  Windows 10 / 11 (64bit)。UCRT に依存しますが Windows 10 以降は標準搭載です。
+
+■ ライセンス
+  エンジン本体は YaneuraOu の派生であり GPLv3 です (LICENSE-GPLv3.txt)。
+  対応ソースの入手は SOURCE.txt を参照してください。
+  評価関数 nn.bin については MODEL.txt を参照してください。

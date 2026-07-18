@@ -16,6 +16,18 @@
 // 動的に生成されたファイルがある。
 #include NNUE_ARCHITECTURE_HEADER
 
+#elif defined(EVAL_NNUE_HALFKP256_SCRELU)
+
+// 標準NNUE halfkp256 の FT 活性化を SCReLU にしたもの (exp013 arm1)
+// ビルドは YANEURAOU_ENGINE_NNUE + EXTRA_CPPFLAGS=-DEVAL_NNUE_HALFKP256_SCRELU を要す
+// (tools/build_yaneuraou.py の EXTRA_CPPFLAGS_MAP 参照)
+#include "architectures/halfkp_256x2-32-32-screlu.h"
+
+#elif defined(EVAL_NNUE_HALFKP256_PAIRWISE)
+
+// 標準NNUE halfkp256 に pairwise multiplication を入れたもの (exp013 arm3)
+#include "architectures/halfkp_256x2-32-32-pairwise.h"
+
 #elif defined(EVAL_NNUE_HALFKP256)
 
 // 標準NNUE型。NNUE評価関数のデフォルトは、halfKP256
@@ -36,6 +48,21 @@
 
 // halfkp_512x2-16-32型
 #include "architectures/halfkp_512x2-16-32.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
+
+// halfkp_512x2-32-32型 (L2=32: L2 がタダか検証用)
+#include "architectures/halfkp_512x2-32-32.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_8_64)
+
+// halfkp_512x2-8-64型 (Suisho10 のアーキ)
+#include "architectures/halfkp_512x2-8-64.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_768X2_8_32)
+
+// halfkp_768x2-8-32型
+#include "architectures/halfkp_768x2-8-32.h"
 
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_1024X2_8_32)
 

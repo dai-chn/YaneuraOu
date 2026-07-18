@@ -163,6 +163,17 @@ void USIEngine::loop()
 #endif
 }
 
+// exp009: filter_quiet コマンドハンドラの前方宣言。
+// 実体は learn/filter_quiet.cpp に定義されている (namespace YaneuraOu::Learner)。
+// このファイル全体が namespace YaneuraOu で囲まれているため、ここでは
+// namespace Learner として宣言すれば YaneuraOu::Learner::filter_quiet_cmd を指す。
+// 実体は USE_SFEN_PACKER に依存するため、EVAL_LEARN ではなくこちらでガード。
+#if defined(USE_SFEN_PACKER)
+namespace Learner {
+    void filter_quiet_cmd(Position& pos, std::istringstream& is);
+}
+#endif
+
 // USIEngine::loop()の下請け。
 // 📝 wasm版対応のため、関数を分離する必要があった。
 bool USIEngine::usi_cmdexec(const std::string& cmd) {
@@ -436,6 +447,13 @@ bool USIEngine::usi_cmdexec(const std::string& cmd) {
     // ユーザーによる実験用コマンド。Engine::user_cmd()が呼び出される。
     else if (token == "user")
         engine.user(is);
+
+#if defined(USE_SFEN_PACKER)
+    // exp009: 静止局面フィルタ。USI: filter_quiet --in p1 [--in p2 ...] --out q1 [--out q2 ...] [--check-pair on|off]
+    // EVAL_LEARN は不要 (filter_quiet は学習関数を呼ばないため)。USE_SFEN_PACKER は通常ビルドで常時 ON。
+    else if (token == "filter_quiet")
+        Learner::filter_quiet_cmd(engine.get_position(), is);
+#endif
 
 
     // エンジンオプションの簡易変更機能

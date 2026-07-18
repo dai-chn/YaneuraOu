@@ -366,17 +366,10 @@ int YaneuraOuEngine::get_hashfull(int maxAge) const
 // utility functions
 
 void YaneuraOuEngine::trace_eval() const {
-    StateListPtr trace_states(new std::deque<StateInfo>(1));
-    Position     p;
-#if STOCKFISH
-	p.set(pos.fen(), options["UCI_Chess960"], &trace_states->back());
-#else
-    p.set(pos.sfen(),&trace_states->back());
-#endif
     verify_networks();
-
-    //sync_cout << "\n" << Eval::trace(p, *networks) << sync_endl;
-	// TODO あとで
+    // exp013: 静的評価値 (Eval::evaluate = output[0]/FV_SCALE, 手番視点) を
+    // parse 可能な形で出力。nnue_eval.py --verify がこの値と照合する。
+    sync_cout << "eval = " << Eval::evaluate(pos) << sync_endl;
 }
 
 // 現在の局面の評価値を出力する。

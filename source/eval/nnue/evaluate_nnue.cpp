@@ -215,6 +215,12 @@ namespace {
 				<< " arch_in_file=" << architecture
 				<< " arch_expected=" << GetArchitectureString()
 				<< sync_endl;
+#if defined(NNUE_FT_SCRELU) || defined(NNUE_FT_PAIRWISE)
+			// exp013 arm1/arm3: マーカー XOR により hash は必ず不一致になる。
+			// 異種ネットとの混載を hard error で拒否する (spec §3 C1)。
+			sync_cout << "info string Error : NNUE hash mismatch is fatal for this build (refusing to load)." << sync_endl;
+			return Tools::ResultCode::FileMismatch;
+#endif
 		}
 
 		result = Detail::ReadParameters<FeatureTransformer>(stream, tmp->feature_transformer);
@@ -429,14 +435,33 @@ void load_eval() {
     #endif
         const Tools::Result result = [&] {
             if (dir_name != "<internal>") {
+#if defined(_WIN32)
+                // 非ASCII (CP932 外) パス耐性: 起動フォルダ相対のファイルを wide(UTF-16) API で読む。
+                // narrow fopen の ANSI コードページ変換を回避する (探索/評価の数値には影響しない)。
+                std::vector<char> eval_data;
+                const bool eval_ok = Directory::ReadBinaryFolderRelativeFileW(dir_name, file_name, eval_data);
+                sync_cout << "info string loading eval file (wide) : "
+                          << dir_name << "\\" << file_name << (eval_ok ? " [ok]" : " [not found]") << sync_endl;
+                if (!eval_ok)
+                    return Tools::Result(Tools::ResultCode::FileNotFound);
+                class MemoryBuffer : public std::basic_streambuf<char> {
+                    public: MemoryBuffer(char* p, size_t n) {
+                        std::streambuf::setg(p, p, p + n);
+                        std::streambuf::setp(p, p + n);
+                    }
+                };
+                MemoryBuffer eval_buffer(eval_data.data(), eval_data.size());
+                std::istream stream(&eval_buffer);
+                return NNUE::ReadParameters(stream);
+#else
                 auto abs_eval_path = Path::Combine(Directory::GetBinaryFolder(), dir_name);
                 const std::string file_path = Path::Combine(abs_eval_path, file_name);
                 std::ifstream stream(file_path, std::ios::binary);
                 sync_cout << "info string loading eval file : " << file_path << sync_endl;
-				if (!stream.is_open())
-					return Tools::Result(Tools::ResultCode::FileNotFound);
-
+                if (!stream.is_open())
+                    return Tools::Result(Tools::ResultCode::FileNotFound);
                 return NNUE::ReadParameters(stream);
+#endif
             }
             else {
                 // C++ way to prepare a buffer for a memory stream

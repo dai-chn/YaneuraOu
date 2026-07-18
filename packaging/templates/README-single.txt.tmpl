@@ -1,0 +1,21 @@
+{{engine_name}} ({{jp_name}}) {{version}} — 将棋 USI エンジン (NNUE)
+
+■ 使い方
+1. このフォルダを任意の場所に展開します (ASCII パス推奨。日本語パスでも動作します)。
+2. 将棋GUI (将棋所 / ShogiGUI 等) の「エンジン登録」で {{name}}.exe を指定します。
+3. 評価関数は eval\nn.bin にあります (設定変更不要)。FV_SCALE の既定値は 16 です。
+
+■ 構成
+  {{name}}.exe        … エンジン本体 (これをGUIに登録)
+  engine_name.txt     … エンジン表示名 ({{engine_name}})
+  eval\nn.bin         … 評価関数 ({{model}})
+
+■ 動作環境
+  Windows 10 / 11 (64bit)、AVX2 対応 CPU。UCRT に依存しますが Windows 10 以降は標準搭載です。
+  ※ エンジン名 "{{engine_name}}" は engine_name.txt で表示されます。将棋所/ShogiGUI 等、
+     エンジンフォルダを作業ディレクトリにする GUI で有効です。
+
+■ ライセンス
+  エンジン本体は YaneuraOu の派生であり GPLv3 です (LICENSE-GPLv3.txt)。
+  対応ソースの入手は SOURCE.txt を参照してください。
+  評価関数 nn.bin については MODEL.txt を参照してください。
