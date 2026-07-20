@@ -25,6 +25,8 @@
 
 namespace YaneuraOu::Eval::NNUE {
 extern int FV_SCALE;
+extern int GTAIL_T;
+extern int GTAIL_GAIN;
 }
  
 // ============================================================
@@ -89,6 +91,16 @@ void add_options_(OptionsMap& options, ThreadPool& threads) {
     // NNUEのFV_SCALEの値
     Options.add("FV_SCALE", Option(16, 1, 128, [&](const Option& o) {
                     YaneuraOu::Eval::NNUE::FV_SCALE = int(o);
+                    return std::nullopt;
+                }));
+
+    // テールゲイン単調変換 g (report27: 極端度の後段調整)。GTAIL_GAIN=100 で恒等 (stock と同一)。
+    Options.add("GTAIL_T", Option(400, 0, 8000, [&](const Option& o) {
+                    YaneuraOu::Eval::NNUE::GTAIL_T = int(o);
+                    return std::nullopt;
+                }));
+    Options.add("GTAIL_GAIN", Option(100, 100, 2000, [&](const Option& o) {
+                    YaneuraOu::Eval::NNUE::GTAIL_GAIN = int(o);
                     return std::nullopt;
                 }));
 }
@@ -156,6 +168,10 @@ namespace Eval {
 namespace NNUE {
 
 	int FV_SCALE = 16; // 水匠5では24がベストらしいのでエンジンオプション"FV_SCALE"で変更可能にした。
+
+	// テールゲイン単調変換 g のパラメータ (report27)。GTAIL_GAIN=100 (=1.0倍) で恒等。
+	int GTAIL_T = 400;
+	int GTAIL_GAIN = 100;
 
     // NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
     SystemWideSharedConstant<NnueNetworks> shared_networks;
@@ -350,6 +366,17 @@ namespace {
         // そのスレッドの計算時間を無駄にする。またdepth固定対局でtime-outするようになる。
 
         auto score = static_cast<Value>(output[0] / FV_SCALE);
+
+        // テールゲイン単調変換 g: |score| > GTAIL_T の超過分を (GTAIL_GAIN/100) 倍する単調変換。
+        // GTAIL_GAIN=100 のとき恒等 (stock と同一)。中盤(|score|<=GTAIL_T)は不変、テールだけ非線形に伸縮。
+        if (GTAIL_GAIN != 100) {
+            int s = (int)score;
+            int a = s < 0 ? -s : s;
+            if (a > GTAIL_T) {
+                long long gv = (long long)GTAIL_T + (long long)(a - GTAIL_T) * (long long)GTAIL_GAIN / 100;
+                score = (Value)(s < 0 ? -(int)gv : (int)gv);
+            }
+        }
 
         // 1) ここ、下手にclipすると学習時には影響があるような気もするが…。
         // 2) accumulator.scoreは、差分計算の時に用いないので書き換えて問題ない。
