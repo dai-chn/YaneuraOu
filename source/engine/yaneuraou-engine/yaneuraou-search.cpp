@@ -1943,6 +1943,13 @@ void YaneuraOuWorker::clear() {
 
 // cutNode : LMRで悪そうな指し手に対してreduction量を増やすnode
 
+
+// EvLog: 評価呼び出し統計の窓文脈 (Matryoshka 設計用)。定義は evaluate_nnue.cpp。
+namespace EvLog {
+struct Ctx { int32_t alpha, beta; int16_t depth; uint8_t ply, flags; };
+extern thread_local Ctx ctx;
+}
+
 template<NodeType nodeType>
 Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta, Depth depth, bool cutNode)
 {
@@ -1954,6 +1961,10 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
 	// 💡 root nodeは必ずPV nodeに含まれる。
 
     constexpr bool PvNode   = nodeType != NonPV;
+
+    // EvLog: このノードの窓文脈を記録 (evaluate() 側で読む)
+    EvLog::ctx = { (int32_t)alpha, (int32_t)beta, (int16_t)depth,
+                   (uint8_t)(ss->ply < 255 ? ss->ply : 255), (uint8_t)(PvNode ? 1 : 0) };
 
 	// root nodeであるか
     constexpr bool rootNode = nodeType == Root;
@@ -4153,6 +4164,11 @@ moves_loop:  // When in check, search starts here
 
 template<NodeType nodeType>
 Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta) {
+
+    // EvLog: このノードの窓文脈を記録 (evaluate() 側で読む)。qsearch は depth=0, flags bit1
+    EvLog::ctx = { (int32_t)alpha, (int32_t)beta, (int16_t)0,
+                   (uint8_t)(ss->ply < 255 ? ss->ply : 255),
+                   (uint8_t)((nodeType != NonPV ? 1 : 0) | 2) };
 
     /*
 		📓 チェスと異なり将棋では、手駒があるため、王手を無条件で延長するとかなりの長手数、王手が続くことがある。

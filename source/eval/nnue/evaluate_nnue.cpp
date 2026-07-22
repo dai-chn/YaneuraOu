@@ -28,7 +28,75 @@ extern int FV_SCALE;
 extern int GTAIL_T;
 extern int GTAIL_GAIN;
 }
- 
+
+// ============================================================
+// EvLog: 探索文脈つき評価呼び出しの統計記録 (Matryoshka 設計用, report20/33)
+//
+// search()/qsearch() のノード入口で窓文脈 (alpha/beta/depth/ply) を
+// thread_local に置き、Eval::evaluate() の復路で 16B レコードを書く。
+// 環境変数 EVAL_LOG_PATH が無ければ完全に無効 (分岐1つのみ)。
+// EVAL_LOG_SAMPLE=N で 1/N サンプリング (既定 1 = 全件)。
+// 計測は Threads=1 前提 (ファイルは thread_local に分離するので複数でも壊れない)。
+// ============================================================
+#include <cstdlib>
+#include <cstdio>
+#include <cstdint>
+
+namespace YaneuraOu { namespace EvLog {
+struct Ctx {
+    int32_t alpha, beta;
+    int16_t depth;
+    uint8_t ply, flags;  // flags: bit0=PvNode, bit1=qsearch
+};
+thread_local Ctx ctx = {0, 0, 0, 0, 0};
+
+#pragma pack(push, 1)
+struct Rec {
+    int32_t alpha, beta, value;
+    int16_t depth;
+    uint8_t ply, flags;  // flags: ctx.flags | (path << 2)  path: 0=fresh 1=acc 2=evalhash
+};
+#pragma pack(pop)
+static_assert(sizeof(Rec) == 16, "Rec must be 16 bytes");
+
+struct Sink {
+    FILE* f = nullptr;
+    uint32_t counter = 0;
+    uint32_t sample = 1;
+    bool checked = false;
+    ~Sink() {
+        if (f)
+            fclose(f);
+    }
+    void ensure() {
+        checked = true;
+        const char* p = std::getenv("EVAL_LOG_PATH");
+        if (!p)
+            return;
+        const char* s = std::getenv("EVAL_LOG_SAMPLE");
+        if (s) {
+            int v = std::atoi(s);
+            if (v > 1)
+                sample = (uint32_t)v;
+        }
+        f = std::fopen(p, "ab");
+    }
+};
+thread_local Sink sink;
+
+inline void log(int32_t value, uint8_t path) {
+    if (!sink.checked)
+        sink.ensure();
+    if (!sink.f)
+        return;
+    if (++sink.counter % sink.sample != 0)
+        return;
+    Rec r{ctx.alpha, ctx.beta, value, ctx.depth, ctx.ply,
+          (uint8_t)(ctx.flags | (path << 2))};
+    std::fwrite(&r, sizeof(r), 1, sink.f);
+}
+}}  // namespace YaneuraOu::EvLog
+
 // ============================================================
 //              旧評価関数のためのヘルパー
 // ============================================================
@@ -539,6 +607,7 @@ Value compute_eval(const Position& pos) {
 Value evaluate(const Position& pos) {
     const auto& accumulator = pos.state()->accumulator;
     if (accumulator.computed_score) {
+        EvLog::log((int32_t)accumulator.score, 1);
         return accumulator.score;
     }
 
@@ -558,11 +627,13 @@ Value evaluate(const Position& pos) {
     entry.decode();
     if (entry.key == key) {
         // あった！
+        EvLog::log((int32_t)entry.score, 2);
         return Value(entry.score);
     }
 #endif
 
     Value score = NNUE::ComputeScore(pos);
+    EvLog::log((int32_t)score, 0);
 #if defined(USE_EVAL_HASH)
     // せっかく計算したのでevaluate hash tableに保存しておく。
     entry.key = key;
