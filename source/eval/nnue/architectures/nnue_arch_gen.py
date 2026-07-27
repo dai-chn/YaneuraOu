@@ -1,3 +1,4 @@
+import re
 # NNUE architecture header generator
 #
 #  NNUE評価関数のarchitecture headerを動的に生成するPythonで書かれたスクリプト。
@@ -58,6 +59,9 @@ if len(arches) <= 3 :
 
 # 📝 SFNNwoPSQT_halfkahm_1536-15-32-ls9のように指定されていれば、SFNNのheaderを生成する。
 SFNN = False
+layer_stack_hand_buckets = "1"
+layer_stack_king_buckets = "1"
+layer_stack_progress_buckets = "1"
 if arches[0].startswith("SFNN"):
     SFNN = True
     if len(arches) <= 5 or not arches[5].startswith("LS"):
@@ -65,8 +69,20 @@ if arches[0].startswith("SFNN"):
         print("Error! : SFNNwoPSQT architecture name must be like SFNNwoPSQT_halfkahm_1536-15-32-ls9 or SFNNwoPSQT_halfkahm_1536-15-32")
         exit()
     else:
-        # 先頭の"LS"を削除。
-        arches[5] = arches[5][2:]
+        # 先頭の"LS"を削除。ls<K>[p<P>] : K = 玉位置 bucket 数 (1 or 9 = k3k3)、P = 進行度 bucket 数 (2/3/4/8/16/32、省略で 1)。
+        # 例: ls9 (従来 = k3k3)、ls9p8 (k3k3 × progress8 = 72 stacks)、ls1p8 (progress8 のみ)
+        ls_spec = arches[5][2:]
+        m_ls = re.fullmatch(r"(\d+)(?:P(\d+))?", ls_spec.upper())
+        if m_ls is None:
+            print(f"Error! : layer stack suffix must be like ls9 or ls9p8 , got {arches[5]}.")
+            exit()
+        layer_stack_king_buckets = m_ls.group(1)
+        layer_stack_progress_buckets = m_ls.group(2) if m_ls.group(2) else "1"
+        layer_stack_hand_buckets = "1"
+        if layer_stack_king_buckets not in ("1", "9") or layer_stack_progress_buckets not in ("1", "2", "3", "4", "8", "16", "32"):
+            print(f"Error! : unsupported layer stack {arches[5]} (king 1/9, progress 1/2/3/4/8/16/32).")
+            exit()
+        arches[5] = str(int(layer_stack_king_buckets) * int(layer_stack_progress_buckets))
     
     # 先頭の"SFNNWOPSQT"削除
     arches.pop(0)
@@ -293,6 +309,10 @@ if SFNN:
 
         // Number of networks stored in the evaluation file
         constexpr int LayerStacks = {layers[3]};
+
+        #define NNUE_SFNN_HAND_BUCKETS {layer_stack_hand_buckets}
+        #define NNUE_SFNN_KING_BUCKETS {layer_stack_king_buckets}
+        #define NNUE_SFNN_PROGRESS_BUCKETS {layer_stack_progress_buckets}
 
         // 各層の次元数
         constexpr IndexType kInputDims   = kTransformedFeatureDimensions;
