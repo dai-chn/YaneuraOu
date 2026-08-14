@@ -44,6 +44,17 @@
 // halfkpe9型
 #include "architectures/halfkpe9_256x2-32-32.h"
 
+#elif defined(EVAL_NNUE_HALFKP512_SCRELU)
+
+// halfkp_512x2-16-32 の FT 活性化を SCReLU にしたもの (report/43 A1、exp013 arm1 の 512 移植)
+// ビルドは YANEURAOU_ENGINE_NNUE_HALFKP_512X2_16_32 + EXTRA_CPPFLAGS=-DEVAL_NNUE_HALFKP512_SCRELU
+#include "architectures/halfkp_512x2-16-32-screlu.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKA_512X2_16_32)
+
+// halfka_512x2-16-32型 (入力近代化: 玉を特徴に含める)
+#include "architectures/halfka_512x2-16-32.h"
+
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_16_32)
 
 // halfkp_512x2-16-32型
@@ -63,6 +74,16 @@
 
 // halfkp_768x2-8-32型
 #include "architectures/halfkp_768x2-8-32.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_768X2_16_64)
+
+// halfkp_768x2-16-64型 (AobaNNUE 1.1 のアーキ)
+#include "architectures/halfkp_768x2-16-64.h"
+
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_768X2_16_32)
+
+// halfkp_768x2-16-32型 (本番 512x2-16-32 の FT 幅だけ拡げたもの、crate 004e)
+#include "architectures/halfkp_768x2-16-32.h"
 
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_1024X2_8_32)
 

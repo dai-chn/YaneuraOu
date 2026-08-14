@@ -248,3 +248,7 @@ FakesAssemblies/
 GeneratedArtifacts/
 _Pvt_Extensions/
 ModelManifest.xml
+
+# --- shogi-nnue fork のビルド成果物 ---
+source/YaneuraOu-by-*
+packaging/__pycache__/
