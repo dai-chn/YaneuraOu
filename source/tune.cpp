@@ -57,7 +57,11 @@ void Tune::make_option(OptionsMap* opts, const string& n, int v, const SetRange&
 			R_end = 0.0020はチューニング終了時の学習率。勾配方向に値の動かす量の係数。500回で1移動する。
 	*/
 
-	std::cout << n << ","                                  //
+	// 🌈 ★stdout ではなく stderr に出す。
+	//    stdout は USI プロトコルのストリームであり、ここに非 USI 行を混ぜると
+	//    GUI や対局ドライバのパーサが壊れる (実際に tools/match.py が誤動作した)。
+	//    Fishtest へのコピペ用途は stderr でも変わらず果たせる。
+	std::cerr << n << ","                                  //
               << v << ","                                  //
               << r(v).first << ","                         //
               << r(v).second << ","                        //

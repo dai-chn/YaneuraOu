@@ -46,6 +46,123 @@ using namespace Eval;  // Eval::PieceValue
 //     https://github.com/yaneurao/YaneuraOu-ScriptCollection/tree/main/SPSA
 //                            %%TUNE_DECLARATION%%
 
+// -------------------
+// 🌈 探索パラメータのチューニング用露出 (shogi-nnue report/44 §6)
+// -------------------
+//
+// SF 由来の探索はマジックナンバーが式に直書きされており、外部から調整できなかった。
+// ここでそれらを名前付き変数に切り出し、ENABLE_SEARCH_TUNE 有効時のみ USI オプション
+// として露出する (TUNE マクロ = SF の SPSA 機構)。
+//
+// ★無効時は constexpr なので定数畳み込みされ、配布ビルドの NPS は不変。
+//   チューニング用ビルドだけ ENABLE_SEARCH_TUNE を定義すること。
+//
+// ★なぜ我々にとって重要か: futility / razoring / null move の margin は **cp 単位**で
+//   書かれている。NNUE の cp スケールは net ごとに違う (我々 FV=14 / Suisho10 FV=36 で
+//   較正した値が異なる) ため、SF 由来の既定値が我々の net に最適である保証は無い。
+//   net ごとに最適値がどれだけ動くかを測るのがこの機構の目的。
+
+#if defined(ENABLE_SEARCH_TUNE)
+	#define TUNABLE_PARAM(name, val) int name = val;
+#else
+	#define TUNABLE_PARAM(name, val) constexpr int name = val;
+#endif
+
+// --- cp スケール依存群 (net の出力較正に連動して最適値が動くと予想される) ---
+
+// Step 7. Razoring: eval < alpha - (base + depth_coef * depth^2) なら qsearch に落とす
+TUNABLE_PARAM(RazorMarginBase, 245)
+TUNABLE_PARAM(RazorMarginDepth, 325)
+
+// Step 8. Futility pruning (child node)
+TUNABLE_PARAM(FutilityMultBase, 114)     // futilityMult の基準値
+TUNABLE_PARAM(FutilityMultTtMiss, 23)   // tt ヒットしなかった時の減算
+TUNABLE_PARAM(FutilityImproving, 2859)  // improving 時の margin 縮小 (/1024)
+TUNABLE_PARAM(FutilityOppWorsening, 333)  // 相手が悪化している時の margin 縮小 (/1024)
+
+// Step 9. Null move pruning の発動閾値: staticEval >= beta - d*depth - i*improving + base
+TUNABLE_PARAM(NmpEvalDepth, 22)
+TUNABLE_PARAM(NmpImproving, 75)
+TUNABLE_PARAM(NmpBase, 399)
+
+// aspiration window の初期幅
+TUNABLE_PARAM(AspirationDeltaBase, 9)
+TUNABLE_PARAM(AspirationDeltaDiv, 5650)
+
+// --- cp スケール非依存群 (枝刈り強度そのもの。NPS に効く) ---
+
+// null move の動的 reduction: R = base + depth / div
+TUNABLE_PARAM(NmpRBase, 9)
+TUNABLE_PARAM(NmpRDepthDiv, 2)
+
+// LMR reduction テーブルと reduction() の係数
+TUNABLE_PARAM(ReductionInit, 3135)          // reductions[i] = init/128.0 * log(i)
+TUNABLE_PARAM(ReductionDelta, 774)          // delta * this / rootDelta
+TUNABLE_PARAM(ReductionNotImproving, 164)   // !improving 時の増分 (/512)
+TUNABLE_PARAM(ReductionBase, 988)          // 定数項
+
+// --- 第二陣 (2026-08-14 追加): やねうらお 149 値のうち、まとまった群で探索の骨格に効くもの ---
+// ★第一陣 17 個は ours +23.1 / S10 +41.2 を獲得済 (report/44 §6.9.6)。
+//   最適点は net に依存しないことが分かっているので、ここで足す分も配布版にそのまま効く見込み。
+
+// Step 16. ttPv での reduction 減算 (LMR の中核)
+TUNABLE_PARAM(PvRedTtPv, 2819)
+TUNABLE_PARAM(PvRedPvNode, 973)
+TUNABLE_PARAM(PvRedValueGtAlpha, 905)
+TUNABLE_PARAM(PvRedDepthGe, 935)
+TUNABLE_PARAM(PvRedCutNode, 959)
+
+// Step 11/12. ProbCut の margin
+TUNABLE_PARAM(ProbCutMargin, 224)
+TUNABLE_PARAM(ProbCutImproving, 61)
+TUNABLE_PARAM(SmallProbCutMargin, 416)
+
+// Step 14. 駒取りの SEE 枝刈り閾値
+TUNABLE_PARAM(CaptureSeeMarginDepth, 167)
+TUNABLE_PARAM(CaptureSeeMarginHist, 34)
+
+// Step 15. singular extension の判定
+TUNABLE_PARAM(SingularBetaBase, 60)
+TUNABLE_PARAM(SingularBetaTtPv, 66)
+TUNABLE_PARAM(SingularBetaDiv, 55)
+
+// Step 10. Internal Iterative Reduction
+TUNABLE_PARAM(IirMinDepth, 6)
+TUNABLE_PARAM(IirPriorReduction, 3)
+
+#undef TUNABLE_PARAM
+
+#if defined(ENABLE_SEARCH_TUNE)
+// 上記を USI オプションとして露出する。
+// 既定 range は [0, 2v] (tune.h の default_range)。★除数は 0 を含むと 0 除算になるので
+// 明示的に下限を与える。
+TUNE(RazorMarginBase, RazorMarginDepth,                                            //
+     FutilityMultBase, FutilityMultTtMiss, FutilityImproving, FutilityOppWorsening,  //
+     NmpEvalDepth, NmpImproving, NmpBase,                                          //
+     AspirationDeltaBase,                                                          //
+     NmpRBase,                                                                     //
+     ReductionInit, ReductionDelta, ReductionNotImproving, ReductionBase);
+
+TUNE(SetRange(1, 6), NmpRDepthDiv);
+TUNE(SetRange(2000, 20000), AspirationDeltaDiv);
+
+// --- 第二陣 (2026-08-14) ---
+TUNE(PvRedTtPv, PvRedPvNode, PvRedValueGtAlpha, PvRedDepthGe, PvRedCutNode,  //
+     ProbCutMargin, ProbCutImproving, SmallProbCutMargin,                    //
+     CaptureSeeMarginDepth, CaptureSeeMarginHist,                            //
+     SingularBetaBase, SingularBetaTtPv);
+
+// ★除数は 0 を含むと 0 除算になるので明示 range を与える
+TUNE(SetRange(20, 110), SingularBetaDiv);
+// depth 条件は 0 だと常時発動して探索が壊れるため下限を持たせる
+TUNE(SetRange(2, 12), IirMinDepth);
+TUNE(SetRange(0, 8), IirPriorReduction);
+
+// ★ReductionInit は reductions[] テーブルの構築時 (Worker::clear(), isready/usinewgame 時)
+//   にのみ読まれる。したがって setoption は isready より前に送ること
+//   (tools/match.py はこの順序で送る)。
+#endif
+
 
 // この構造体メンバーに対応するエンジンオプションを生やす
 void SearchOptions::add_options(OptionsMap& options) {
@@ -109,6 +226,11 @@ void SearchOptions::add_options(OptionsMap& options) {
                     enteringKingRule = to_entering_king_rule(o);
                     return std::nullopt;
                 }));
+
+    // 📝 TUNE() で宣言したパラメータの USI オプション化は
+    //    YaneuraOuEngine::add_options() 末尾の Tune::init(options) が既に行っている。
+    //    ここで重ねて呼ぶと OptionsMap への重複追加になりエンジンが起動に失敗する
+    //    (実測: "Option "RazorMarginBase" was already added!")。
 }
 
 
@@ -1432,7 +1554,8 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
 
             // Reset aspiration window starting size
             // aspiration windowの開始サイズをリセットする。
-            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 9000;
+            delta     = AspirationDeltaBase + threadIdx % 8
+                    + std::abs(rootMoves[pvIdx].meanSquaredScore) / AspirationDeltaDiv;
             Value avg = rootMoves[pvIdx].averageScore;
             alpha     = std::max(avg - delta, -VALUE_INFINITE);
             beta      = std::min(avg + delta,  VALUE_INFINITE);
@@ -1922,7 +2045,7 @@ void YaneuraOuWorker::clear() {
 
 	// reductions tableの初期化(これはWorkerごとが持つように変更された)
     for (size_t i = 1; i < reductions.size(); ++i)
-        reductions[i] = int(2763 / 128.0 * std::log(i));
+        reductions[i] = int(ReductionInit / 128.0 * std::log(i));
 
 	// 📝 lowPlyHistoryの初期化は、対局ごとではなく、局面ごと("go"のごと)に変更された。
 
@@ -2913,7 +3036,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
 	// 評価値が非常に低い場合、検索を完全にスキップして qsearch の値を返します。
     // PvNode では、チェックメイトが返されるのを防ぐためのガードが必要です。
 
-    if (!PvNode && eval < alpha - 502 - 306 * depth * depth)
+    if (!PvNode && eval < alpha - RazorMarginBase - RazorMarginDepth * depth * depth)
         return qsearch<NonPV>(pos, ss, alpha, beta);
 
 	// -----------------------
@@ -2940,10 +3063,11 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
         // 💡 depth(残り探索深さ)に応じたfutility margin。
 
 		auto futility_margin = [&](Depth d) {
-            Value futilityMult = 76 - 21 * !ss->ttHit;
+            Value futilityMult = FutilityMultBase - FutilityMultTtMiss * !ss->ttHit;
 
             return futilityMult * d                                //
-                 - (2686 * improving + 362 * opponentWorsening) * futilityMult / 1024
+                 - (FutilityImproving * improving + FutilityOppWorsening * opponentWorsening)
+                       * futilityMult / 1024
                  + std::abs(correctionValue) / 180600;
         };
 
@@ -2958,7 +3082,9 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
     // -----------------------
 
     //  🖊 evalがbetaを超えているので1手パスしてもbetaは超えそう。だからnull moveを試す
-    if (cutNode && ss->staticEval >= beta - 16 * depth - 53 * improving + 378 && !excludedMove
+    if (cutNode
+        && ss->staticEval >= beta - NmpEvalDepth * depth - NmpImproving * improving + NmpBase
+        && !excludedMove
 #if STOCKFISH
         && pos.non_pawn_material(us)
     // 💡 盤上にpawn以外の駒がある ≒ pawnだけの終盤ではない。
@@ -2973,7 +3099,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
         // Null move dynamic reduction based on depth
         // (残り探索)深さと評価値に基づくnull moveの動的なreduction
 
-        Depth R = 7 + depth / 3;
+        Depth R = NmpRBase + depth / NmpRDepthDiv;
 
         ss->currentMove                   = Move::null();
         ss->continuationHistory           = &continuationHistory[0][0][NO_PIECE][0];
@@ -3041,7 +3167,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
     // 十分な探索深さがある場合、置換表（TTMove）に手がないPVノードやCutノードについては探索深さを削減する。
     //（*Scaler）IIR をよりアグレッシブにすると、スケーリング効率が悪化する。
 
-    if (!ss->followPV && !allNode && depth >= 6 && !ttData.move && priorReduction <= 3)
+    if (!ss->followPV && !allNode && depth >= IirMinDepth && !ttData.move && priorReduction <= IirPriorReduction)
         depth--;
 
 #if OLD_CODE
@@ -3079,7 +3205,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
     // 直前の手を（ほぼ）安全に枝刈りできます。
 
     // probCutに使うbeta値。
-    probCutBeta = beta + 224 - 61 * improving;
+    probCutBeta = beta + ProbCutMargin - ProbCutImproving * improving;
 
 	if (depth >= 3
         && !is_decisive(beta)
@@ -3157,7 +3283,7 @@ moves_loop:  // When in check, search starts here
     // Step 12. 小さなProbcutのアイデア
     // -----------------------
 
-    probCutBeta = beta + 416;
+    probCutBeta = beta + SmallProbCutMargin;
     if ((ttData.bound & BOUND_LOWER) && ttData.depth >= depth - 4 && ttData.value >= probCutBeta
         && !is_decisive(beta) && is_valid(ttData.value) && !is_decisive(ttData.value))
         return probCutBeta;
@@ -3353,7 +3479,7 @@ moves_loop:  // When in check, search starts here
                 // 駒取りや王手に対するSEE（静的交換評価）に基づく枝刈り
 				// ステイルメイト（引き分け）を狙うために、最後の駒を犠牲にする手の枝刈りは避ける
 
-                int margin = std::max(167 * depth + captHist * 34 / 1024, 0);
+                int margin = std::max(CaptureSeeMarginDepth * depth + captHist * CaptureSeeMarginHist / 1024, 0);
 #if STOCKFISH
 				if ((alpha >= VALUE_DRAW || pos.non_pawn_material(us) != PieceValue[movedPiece])
 #else
@@ -3481,7 +3607,8 @@ moves_loop:  // When in check, search starts here
 
             //  📍 このmargin値は評価関数の性質に合わせて調整されるべき。
 
-            Value singularBeta  = ttData.value - (60 + 66 * (ss->ttPv && !PvNode)) * depth / 55;
+            Value singularBeta  = ttData.value
+                - (SingularBetaBase + SingularBetaTtPv * (ss->ttPv && !PvNode)) * depth / SingularBetaDiv;
             Depth singularDepth = newDepth / 2;
 
             // 💡 move(ttMove)の指し手を以下のsearch()での探索から除外。
@@ -3602,8 +3729,8 @@ moves_loop:  // When in check, search starts here
         // Pv Nodesに対してreductionを減らす(*Scaler)
 
 		if (ss->ttPv)
-            r -= 2819 + PvNode * 973 + (ttData.value > alpha) * 905
-               + (ttData.depth >= depth) * (935 + cutNode * 959);
+            r -= PvRedTtPv + PvNode * PvRedPvNode + (ttData.value > alpha) * PvRedValueGtAlpha
+               + (ttData.depth >= depth) * (PvRedDepthGe + cutNode * PvRedCutNode);
 
         // These reduction adjustments have no proven non-linear scaling
         // これらの減少量調整には、非線形スケーリングの有効性が証明されていません
@@ -4872,7 +4999,8 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 // LMRのreductionの値を計算する。
 int Search::YaneuraOuWorker::reduction(bool i, Depth d, int mn, int delta) const {
     int reductionScale = reductions[d] * reductions[mn];
-    return reductionScale - delta * 585 / rootDelta + !i * reductionScale * 206 / 512 + 1133;
+    return reductionScale - delta * ReductionDelta / rootDelta
+         + !i * reductionScale * ReductionNotImproving / 512 + ReductionBase;
 }
 
 // 📝 やねうら王では、下記のelapsed(), elapsed_time()は用いない。
