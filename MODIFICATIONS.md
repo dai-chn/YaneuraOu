@@ -4,37 +4,85 @@ Upstream: https://github.com/yaneurao/YaneuraOu
 Base commit: `cc73ac44ad1433463df73fc6c97c06fd27c5d266` (2026-05-09、`UPSTREAM.md` 参照)
 License: GPLv3 (`Copying.txt`)
 
-本フォークは上流 YaneuraOu を基点に、将棋NNUE研究プロジェクトの配布・実験用に以下を改変・追加した
-(GPLv3 §5 の改変告知)。**既定の NNUE ビルド (`YANEURAOU_ENGINE_NNUE`, HalfKP_256x2-32-32, CReLU) の
-探索・評価の挙動を変える変更は wide-path 修正を除いて無い** — 実験系はすべてコンパイルフラグの後ろ、
-または対局中に呼ばれない追加サブコマンド。
+本フォークは上流 YaneuraOu を基点に、将棋NNUE研究プロジェクト **Kisou Engine (棋想)** の
+配布・実験用に以下を改変・追加した (GPLv3 §5 の改変告知)。
+
+## ★配布版 (Kisou Engine) の挙動に直接効く改変
+
+配布バイナリはこの 2 点を含む。**上流の探索既定値とは異なる。**
+
+### 1. 探索パラメータの再調整 (SPSA)
+
+`source/engine/yaneuraou-engine/yaneuraou-search.cpp`:
+razoring / futility / null move / LMR reduction / aspiration window / ProbCut /
+SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM` マクロで定義し、
+**SPSA (Fishtest 方式) による最適化結果を既定値として反映**した。
+
+```
+#if defined(ENABLE_SEARCH_TUNE)
+    #define TUNABLE_PARAM(name, val) int name = val;      // USI オプションとして可変
+#else
+    #define TUNABLE_PARAM(name, val) constexpr int name = val;  // 焼き込み (配布版)
+#endif
+```
+
+- `ENABLE_SEARCH_TUNE` 未定義 (= 配布ビルド) では `constexpr` のままなので、
+  上流と同じくコンパイル時定数として畳み込まれる。**NPS への影響は無い** (実測確認済み)。
+- `ENABLE_SEARCH_TUNE` 定義時のみ USI オプションとして露出し、Stockfish の `TUNE()` 機構で
+  SPSA から駆動できる。`Tune::init(options)` は上流に既に在るものをそのまま使う。
+
+### 2. NNUE アーキテクチャ `halfkp_512x2-16-32` の追加
+
+配布版の評価関数 (`eval/nn.bin`) が使うアーキテクチャ。
+`source/eval/nnue/architectures/halfkp_512x2-16-32.h` (新規) と
+`source/eval/nnue/nnue_architecture.h` / `source/Makefile` の分岐。
 
 ## 配布・移植性
 
 - `source/eval/nnue/evaluate_nnue.cpp` / `source/misc.cpp` / `source/misc.h`:
-  評価ファイル (nn.bin) のロードを **wide(UTF-16) Windows API 化** (`Directory::ReadBinaryFolderRelativeFileW`
-  = `GetModuleFileNameW` + `CreateFileW`)。ANSI コードページ (例 CP932) で表現できない文字を含むパス
-  (韓国語/絵文字/混在スクリプト) でも評価関数を読めるようにする。**探索・評価の数値は不変** (ロード経路のみ変更)。
-- `dispatcher/`: CPU の SIMD を判定し `engine\YaneuraOu-<ISA>.exe` を透過起動するランチャ (YaneuraOu 本体とは
-  独立したプログラム。CreateProcessW で子を起こし stdio を継承 = USI プロトコルに介入しない)。
-- `packaging/`: 配布パッケージ生成スクリプト (改変 YaneuraOu を 3 SIMD でビルドし、ディスパッチャ・評価関数・
-  ライセンスと共に zip 化する)。GPLv3 の「ビルド/インストールを制御するスクリプト」に相当。
+  評価ファイル (nn.bin) のロードを **wide(UTF-16) Windows API 化**
+  (`Directory::ReadBinaryFolderRelativeFileW` = `GetModuleFileNameW` + `CreateFileW`)。
+  ANSI コードページ (例 CP932) で表現できない文字を含むパス (韓国語/絵文字/混在スクリプト)
+  でも評価関数を読めるようにする。**探索・評価の数値は不変** (ロード経路のみ変更)。
+- `dispatcher/`: CPU の SIMD を判定し `engine\YaneuraOu-<ISA>.exe` を透過起動するランチャ
+  (YaneuraOu 本体とは独立したプログラム。CreateProcessW で子を起こし stdio を継承 =
+  USI プロトコルに介入しない)。
+- `packaging/`: 配布パッケージ生成スクリプト。GPLv3 の「ビルド/インストールを制御する
+  スクリプト」に相当。
+- `source/tune.cpp`: Fishtest 用パラメータ CSV の出力先を `std::cout` → `std::cerr` に変更。
+  stdout は USI プロトコルのストリームであり、非 USI 行を混ぜると GUI や対局ドライバの
+  パーサが壊れるため。
 
-## 実験用アーキ variant (コンパイルフラグ後ろ、既定ビルド非影響)
+## 実験用アーキ variant (コンパイルフラグ後ろ、配布ビルド非影響)
 
-- `source/eval/nnue/architectures/halfkp_768x2-8-32.h` (新規)、`halfkp_256x2-32-32-screlu.h` (新規)、
-  `halfkp_256x2-32-32-pairwise.h` (新規)。
-- `source/eval/nnue/nnue_architecture.h`: 上記 arch の分岐 (`EVAL_NNUE_HALFKP256_SCRELU` / `_PAIRWISE`)。
-- `source/eval/nnue/nnue_feature_transformer.h`: SCReLU (`NNUE_FT_SCRELU`) / pairwise (`NNUE_FT_PAIRWISE`)
-  の FT 変換と hash マーカー (AVX2/scalar のみ)。
-- `source/eval/nnue/evaluate_nnue.cpp`: SCReLU/pairwise ビルドで nn.bin の hash 不一致を hard error にする
-  (`#if defined(NNUE_FT_SCRELU) || defined(NNUE_FT_PAIRWISE)` の後ろ、異種ネット混載の拒否)。
-- `source/misc.cpp`: `config_info()` に 768x2 の arch 名を追加。
-- `source/Makefile`: 上記 arch 用の preset。
+`source/eval/nnue/architectures/` に以下を追加し、`nnue_architecture.h` と `Makefile` に分岐を追加:
 
-## データ生成・検証ツール
+| ヘッダ | 用途 |
+|---|---|
+| `halfkp_512x2-8-64.h` | Suisho10 と同一アーキ (比較用) |
+| `halfkp_512x2-32-32.h` | L2 幅の検証 |
+| `halfkp_512x2-16-32-screlu.h` | FT 活性化を SCReLU 化 |
+| `halfkp_768x2-8-32.h` / `halfkp_768x2-16-32.h` | FT 幅 768 の検証 |
+| `halfkp_768x2-16-64.h` | AobaNNUE 1.1 と同一アーキ (比較用) |
+| `halfkp_1024x2-8-32.h` / `halfkp_1024x2-8-64.h` | FT 幅 1024 |
+| `halfka_512x2-16-32.h` | HalfKA 入力 |
+| `halfkp_256x2-32-32-screlu.h` / `-pairwise.h` | 256 系の活性化 variant |
+| `sfnnwop-1536.h` | SFNN 型 |
+
+- `source/eval/nnue/nnue_feature_transformer.h`: SCReLU (`NNUE_FT_SCRELU`) /
+  pairwise (`NNUE_FT_PAIRWISE`) の FT 変換と hash マーカー (AVX2/scalar のみ)。
+- `source/eval/nnue/evaluate_nnue.cpp`: SCReLU/pairwise ビルドで nn.bin の hash 不一致を
+  hard error にする (異種ネット混載の拒否)。
+- `source/misc.cpp`: `config_info()` に追加 arch 名。
+
+## データ生成・検証・計測ツール (対局中は呼ばれない)
 
 - `source/learn/filter_quiet.cpp` (新規) + `source/usi.cpp`: `filter_quiet` USI サブコマンド
-  (静止局面フィルタ、データセット生成用。`USE_SFEN_PACKER` ガード、対局中は呼ばれない)。
-- `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: `trace_eval()` が静的評価値を `eval = <値>` 形式で
-  出力 (元は空スタブ)。`eval` USI コマンド実行時のみ動作、探索挙動は不変。export 検証 (`tools/nnue_eval.py`) 用。
+  (静止局面フィルタ、データセット生成用。`USE_SFEN_PACKER` ガード)。
+- `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: `trace_eval()` が静的評価値を
+  `eval = <値>` 形式で出力 (元は空スタブ)。`eval` USI コマンド実行時のみ動作、探索挙動は不変。
+  学習器と推論の数値一致検証 (`tools/nnue_eval.py --verify`) に使う。
+- `source/eval/nnue/evaluate_nnue.cpp`: テールゲイン単調変換 `g` (USI オプション
+  `GTAIL_T` / `GTAIL_GAIN`)。**既定値 `GTAIL_GAIN=100` は恒等変換**なので、
+  設定しない限り上流と同一の評価値を返す。
+- eval 呼び出し統計の計測パッチ (`EVAL_LOG_PATH` 未設定なら完全無効)。
