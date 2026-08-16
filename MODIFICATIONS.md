@@ -67,7 +67,8 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 | `halfkp_1024x2-8-32.h` / `halfkp_1024x2-8-64.h` | FT 幅 1024 |
 | `halfka_512x2-16-32.h` | HalfKA 入力 |
 | `halfkp_256x2-32-32-screlu.h` / `-pairwise.h` | 256 系の活性化 variant |
-| `sfnnwop-1536.h` | SFNN 型 |
+| `sfnnwop-1536.h` | SFNN 型 (upstream 付属) |
+| `SFNNwoPSQT_halfka2_1024-7-64-ls9.h` | SFNN HalfKA2 1024-7-64 9スタック (Suisho11Plus と同型)。<br>upstream の `nnue_arch_gen.py` による自動生成物。Phase B 用 |
 
 - `source/eval/nnue/nnue_feature_transformer.h`: SCReLU (`NNUE_FT_SCRELU`) /
   pairwise (`NNUE_FT_PAIRWISE`) の FT 変換と hash マーカー (AVX2/scalar のみ)。
