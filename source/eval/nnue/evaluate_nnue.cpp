@@ -98,6 +98,127 @@ inline void log(int32_t value, uint8_t path) {
 }}  // namespace YaneuraOu::EvLog
 
 // ============================================================
+// EvalGateSim: 合成 small eval によるゲートのシミュレーション (report45 Phase-0)
+//
+// 狙い: 「区間型の軽 eval で境界判定を肩代わりさせたとき、探索の品質がどれだけ落ちるか」を
+//       ネットも accumulator の改造も無しに測る。
+//
+//   small(P) = large(P) + noise(P)      noise は局面キーから決定的に生成 (標準偏差 GateE cp)
+//   区間      = small ± (GateC/100)*GateE
+//   hi <= alpha           → fail low  側で確定 → small を返す
+//   lo >= beta            → fail high 側で確定 → small を返す
+//   それ以外               → escalate           → large を返す
+//
+// ★返すのは点推定 (small) であって区間の端ではない。境界値を返すと親に渡る bound が
+//   緩くなり木が膨らむ (report45 §5.3)。保守性は escalate の判断側で担保する。
+// ★ノイズは局面キーのみに依存させる。訪問ごとに変わると設計に無い不安定性が混入して
+//   測定が交絡する。
+//
+// 本シミュレーションは large を常に計算するので **速度は測れない**。測れるのは
+// 「コストがゼロだったと仮定したときの品質劣化」= 損失側だけ。
+// GateE=0 (既定) で完全に無効。ENABLE_EVAL_GATE_SIM 未定義なら存在しない。
+// ============================================================
+#if defined(ENABLE_EVAL_GATE_SIM)
+#include <cmath>
+
+namespace YaneuraOu { namespace EvalGateSim {
+
+int E = 0;    // ノイズ標準偏差 [cp]。0 で無効
+int C = 200;  // 区間半幅 = (C/100) * E
+
+struct Stats {
+    uint64_t decided_lo = 0, decided_hi = 0, escalated = 0, no_ctx = 0;
+    uint64_t q_decided = 0, q_escalated = 0;
+    ~Stats();
+};
+Stats stats;  // Threads=1 前提
+
+// splitmix64: 局面キー → 決定的な擬似乱数
+inline uint64_t mix(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// 標準正規 (Box-Muller)。局面キーのみに依存する。
+inline double gauss(uint64_t key) {
+    const uint64_t a = mix(key);
+    const uint64_t b = mix(key ^ 0xdeadbeefcafef00dULL);
+    const double u1 = double((a >> 11) + 1) * (1.0 / 9007199254740993.0);
+    const double u2 = double((b >> 11) + 1) * (1.0 / 9007199254740993.0);
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2);
+}
+
+// large: 本物の評価値。返り値: 探索へ返す値。
+//
+// ★noinline 必須。inline 展開させると evaluate() → ComputeScore →
+//   accumulator 更新の経路まで codegen が変わり、**ゲートが無効 (E=0) でも**
+//   探索開始直後にアクセス違反で落ちた (2026-08-16 に実測)。
+//   測定用コードが本体の最適化に干渉しないよう、呼び出し境界で切っておく。
+__attribute__((noinline)) int32_t apply(int32_t large, uint64_t key) {
+    if (E <= 0)
+        return large;
+
+    const EvLog::Ctx& c = EvLog::ctx;
+    // 探索外からの呼び出し (Position::set / eval コマンド等) は窓が無いので素通し。
+    // 探索中は必ず alpha < beta。
+    if (c.alpha >= c.beta) {
+        stats.no_ctx++;
+        return large;
+    }
+
+    const int32_t noise = int32_t(std::lround(gauss(key) * double(E)));
+    int32_t       small = large + noise;
+    // mate スコア域に食い込ませない
+    small = small < -30000 ? -30000 : (small > 30000 ? 30000 : small);
+
+    const int32_t half = int32_t((int64_t)E * (int64_t)C / 100);
+    const bool    q    = (c.flags & 2) != 0;
+
+    if (small + half <= c.alpha) {  // 上界が alpha 以下 → fail low 確定
+        stats.decided_lo++;
+        if (q) stats.q_decided++;
+        return small;
+    }
+    if (small - half >= c.beta) {   // 下界が beta 以上 → fail high 確定
+        stats.decided_hi++;
+        if (q) stats.q_decided++;
+        return small;
+    }
+    stats.escalated++;
+    if (q) stats.q_escalated++;
+    return large;
+}
+
+Stats::~Stats() {
+    const char* p = std::getenv("EVAL_GATE_STATS");
+    if (!p || E <= 0)
+        return;
+    FILE* f = std::fopen(p, "a");
+    if (!f)
+        return;
+    const uint64_t dec   = decided_lo + decided_hi;
+    const uint64_t total = dec + escalated;
+    std::fprintf(f,
+                 "E=%d C=%d total=%llu decided=%llu decided_lo=%llu decided_hi=%llu "
+                 "escalated=%llu escalate_rate=%.5f no_ctx=%llu "
+                 "q_decided=%llu q_escalated=%llu q_escalate_rate=%.5f\n",
+                 E, C, (unsigned long long)total, (unsigned long long)dec,
+                 (unsigned long long)decided_lo, (unsigned long long)decided_hi,
+                 (unsigned long long)escalated,
+                 total ? double(escalated) / double(total) : 0.0,
+                 (unsigned long long)no_ctx, (unsigned long long)q_decided,
+                 (unsigned long long)q_escalated,
+                 (q_decided + q_escalated)
+                     ? double(q_escalated) / double(q_decided + q_escalated)
+                     : 0.0);
+    std::fclose(f);
+}
+}}  // namespace YaneuraOu::EvalGateSim
+#endif  // ENABLE_EVAL_GATE_SIM
+
+// ============================================================
 //              旧評価関数のためのヘルパー
 // ============================================================
 
@@ -171,6 +292,18 @@ void add_options_(OptionsMap& options, ThreadPool& threads) {
                     YaneuraOu::Eval::NNUE::GTAIL_GAIN = int(o);
                     return std::nullopt;
                 }));
+
+#if defined(ENABLE_EVAL_GATE_SIM)
+    // 合成 small eval ゲートのシミュレーション (report45 Phase-0)。GateE=0 で無効。
+    Options.add("GateE", Option(0, 0, 2000, [&](const Option& o) {
+                    YaneuraOu::EvalGateSim::E = int(o);
+                    return std::nullopt;
+                }));
+    Options.add("GateC", Option(200, 0, 1000, [&](const Option& o) {
+                    YaneuraOu::EvalGateSim::C = int(o);
+                    return std::nullopt;
+                }));
+#endif
 }
 #endif
 
@@ -603,12 +736,27 @@ Value compute_eval(const Position& pos) {
     return NNUE::ComputeScore(pos, true);
 }
 
+// 合成 small ゲートの適用 (report45 Phase-0)。
+// ENABLE_EVAL_GATE_SIM 未定義なら恒等 = 配布ビルドには存在しない。
+inline Value eval_gate(Value v, const Position& pos) {
+#if defined(ENABLE_EVAL_GATE_SIM)
+    // ★局面キーの取得はゲートが有効なときだけ行う。引数として書くと呼び出し側で
+    //   常に評価され、無効時にもコストと副作用が乗る。
+    if (EvalGateSim::E <= 0)
+        return v;
+    return Value(EvalGateSim::apply((int32_t)v, (uint64_t)pos.state()->key()));
+#else
+    (void)pos;
+    return v;
+#endif
+}
+
 // 評価関数
 Value evaluate(const Position& pos) {
     const auto& accumulator = pos.state()->accumulator;
     if (accumulator.computed_score) {
         EvLog::log((int32_t)accumulator.score, 1);
-        return accumulator.score;
+        return eval_gate(accumulator.score, pos);
     }
 
 #if defined(USE_GLOBAL_OPTIONS)
@@ -628,7 +776,7 @@ Value evaluate(const Position& pos) {
     if (entry.key == key) {
         // あった！
         EvLog::log((int32_t)entry.score, 2);
-        return Value(entry.score);
+        return eval_gate(Value(entry.score), pos);
     }
 #endif
 
@@ -642,7 +790,10 @@ Value evaluate(const Position& pos) {
     *g_evalTable[key] = entry;
 #endif
 
-    return score;
+    // ★ eval hash には素の score を保存し、ゲートは返り値にだけ掛ける。
+    //    ゲート後の値を保存すると、窓が変わった次の訪問で「粗い値」が素通しで
+    //    再利用されてしまい、シミュレーションが設計と乖離する。
+    return eval_gate(score, pos);
 }
 
 // 差分計算ができるなら進める

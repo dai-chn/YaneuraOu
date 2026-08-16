@@ -87,3 +87,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `GTAIL_T` / `GTAIL_GAIN`)。**既定値 `GTAIL_GAIN=100` は恒等変換**なので、
   設定しない限り上流と同一の評価値を返す。
 - eval 呼び出し統計の計測パッチ (`EVAL_LOG_PATH` 未設定なら完全無効)。
+- `source/eval/nnue/evaluate_nnue.cpp`: **合成 small eval ゲートのシミュレータ**
+  (`EvalGateSim`, report/45 Phase-0)。区間型の軽量評価で探索の境界判定を肩代わりさせたとき
+  探索品質がどれだけ落ちるかを、実際の軽量ネットを作らずに測るための計測コード。
+  `small = large + ノイズ(局面キーでシード)` を合成し、区間が窓境界 (alpha/beta) を
+  またぐときだけ本物の評価値へ escalate する。USI オプション `GateE` (ノイズ標準偏差 cp、
+  既定 0 = 無効) / `GateC` (区間半幅 = GateC/100 × GateE)。
+  **`ENABLE_EVAL_GATE_SIM` を定義したビルドにのみ存在する。配布ビルドには含まれない。**
+  ★実装上の注意: ゲート本体は `noinline`。inline 展開させると `evaluate()` から
+  accumulator 更新までの codegen が変わり、**ゲート無効時 (`GateE=0`) でも**探索開始直後に
+  アクセス違反で落ちる (2026-08-16 実測)。計測コードは呼び出し境界で切ること。
