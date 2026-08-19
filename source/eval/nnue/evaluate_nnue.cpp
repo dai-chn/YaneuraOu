@@ -820,6 +820,21 @@ Value evaluate(const Position& pos) {
 #endif
 
     Value score = NNUE::ComputeScore(pos);
+
+#if defined(ENABLE_PROBE_EVAL_TWICE)
+    // ★限界コストプローブ (task#45 / report/49 §4.6):
+    //   computed_score だけ落として ComputeScore をもう一度呼ぶ。
+    //   computed_accumulation は立ったままなので **行 gather は走らず**、
+    //   再実行されるのは Transform の活性化 + 密層 + 出力のみ。
+    //   同じ値の再書き込みなので冪等 = 探索は不変 (要同一性チェック)。
+    //   → NPS の落ちが「活性化+密層」の限界コスト。f (幅比例分) から引けば gather が出る。
+    {
+        pos.state()->accumulator.computed_score = false;
+        volatile Value probe_v2 = NNUE::ComputeScore(pos);
+        (void)probe_v2;
+    }
+#endif
+
     EvLog::log((int32_t)score, 0);
 #if defined(USE_EVAL_HASH)
     // せっかく計算したのでevaluate hash tableに保存しておく。
