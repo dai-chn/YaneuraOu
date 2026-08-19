@@ -653,7 +653,14 @@ int correction_value(const YaneuraOuWorker& w, const Position& pos, const Stack*
                 + (*(ss - 4)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
                  : 8;
 
+#if defined(ENABLE_MATERIAL_CORRHIST)
+    // material correction history (SF PR #5556 / task#51)。
+    // 係数は minor (8620) と同オーダーの初期値。採用時に SPSA で詰める前提。
+    const int mcv = shared.material_correction_entry(pos).at(us).material;
+    return 12153 * pcv + 8620 * micv + 12355 * (wnpcv + bnpcv) + 7982 * cntcv + 8620 * mcv;
+#else
     return 12153 * pcv + 8620 * micv + 12355 * (wnpcv + bnpcv) + 7982 * cntcv;
+#endif
 }
 
 // Add correctionHistory value to raw staticEval and guarantee evaluation
@@ -679,6 +686,10 @@ void update_correction_history(const Position&          pos,
     shared.minor_piece_correction_entry(pos).at(us).minor << bonus * 153 / 128;
     shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite << bonus * nonPawnWeight / 128;
     shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack << bonus * nonPawnWeight / 128;
+#if defined(ENABLE_MATERIAL_CORRHIST)
+    // 重み 147/128 は SF #5556 当時の相対比に合わせた初期値 (採用時 SPSA で詰める)
+    shared.material_correction_entry(pos).at(us).material << bonus * 147 / 128;
+#endif
 
     if (m.is_ok())
     {

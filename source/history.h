@@ -298,6 +298,13 @@ struct CorrectionBundle {
     StatsEntry<T, D, true> minor;
     StatsEntry<T, D, true> nonPawnWhite;
     StatsEntry<T, D, true> nonPawnBlack;
+#if defined(ENABLE_MATERIAL_CORRHIST)
+    // material correction history (SF PR #5556, xu-shawn 氏考案 / task#51, report/50 Stage 1-2)。
+    // materialKey (駒種の枚数だけの Zobrist、position.cpp:156 で加算式に維持) で index する。
+    // 将棋では駒台とセットで駒割が変わるため、同一 material の局面群への
+    // 系統的な静的評価バイアスを補正する狙いはチェスと同型に成立する。
+    StatsEntry<T, D, true> material;
+#endif
 
 	// メンバーにまとめて代入するoperator
     void operator=(T val) {
@@ -305,6 +312,9 @@ struct CorrectionBundle {
         minor        = val;
         nonPawnWhite = val;
         nonPawnBlack = val;
+#if defined(ENABLE_MATERIAL_CORRHIST)
+        material     = val;
+#endif
     }
 };
 
@@ -396,6 +406,15 @@ struct SharedHistories {
     const auto& nonpawn_correction_entry(const Position& pos) const {
         return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
     }
+
+#if defined(ENABLE_MATERIAL_CORRHIST)
+    auto& material_correction_entry(const Position& pos) {
+        return correctionHistory[pos.material_key() & sizeMinus1];
+    }
+    const auto& material_correction_entry(const Position& pos) const {
+        return correctionHistory[pos.material_key() & sizeMinus1];
+    }
+#endif
 
     UnifiedCorrectionHistory correctionHistory;
     PawnHistory              pawnHistory;
