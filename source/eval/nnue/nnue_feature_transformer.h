@@ -45,6 +45,37 @@
 namespace YaneuraOu {
 namespace Eval::NNUE {
 
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+// ============================================================
+//   FT のメモリトラフィック内訳を数える (task#45 / report/49)
+// ============================================================
+// ★動機: 我々の NPS は FT の行 gather でメモリ律速 (report/23)。
+//   その行読みが「差分 (2〜4 行)」と「全再構築 (~38 行)」のどちらに
+//   使われているかで、打つべき手が変わる:
+//     - 全再構築が支配的 → Finny table (王位置ごとの accumulator キャッシュ) が効く
+//                          = V970 の +15% NPS の正体という仮説
+//     - 差分が支配的     → 幅を削る / 疎化するしか無い
+//
+// 全再構築が起きる経路は 2 つある:
+//   (a) refresh_accumulator … 差分連鎖が切れた (親の accumulator が未計算)
+//   (b) update_accumulator 内の reset … **王が動いた**。HalfKP は王相対なので
+//       その手番側の全特徴が張り替わる。removed は空で added が全 active になる
+//
+// ★計測は「呼び出し回数」でなく **行数** で数える。コストは行数に比例するため
+//   (report/33 の教訓: コストは MAC でなくメモリで数えろ)。
+struct FtStat {
+    uint64_t n_transform = 0;   // Transform 呼び出し (= evaluate 相当)
+    uint64_t n_refresh   = 0;   // (a) 連鎖断絶による全再構築
+    uint64_t n_update    = 0;   // 差分更新の呼び出し
+    uint64_t n_reset     = 0;   // (b) 王移動で reset された perspective 数
+    uint64_t rows_full   = 0;   // (a)+(b) で読んだ行数
+    uint64_t rows_inc    = 0;   // 差分で読んだ行数
+};
+// C++17 の inline 変数。計測用ビルドのみなので TU をまたぐ定義の手間を省く。
+// Threads=1 前提 (計測用ビルドのみ。並列では数え落とす)。
+inline FtStat g_ft_stat;
+#endif
+
 // If vector instructions are enabled, we update and refresh the
 // accumulator tile by tile such that each tile fits in the CPU's
 // vector registers.
@@ -274,6 +305,9 @@ class FeatureTransformer {
 	// Convert input features
 	// 入力特徴量を変換する
 	void Transform(const Position& pos, OutputType* output, bool refresh) const {
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		g_ft_stat.n_transform++;
+#endif
 		if (refresh || !UpdateAccumulatorIfPossible(pos)) {
 			refresh_accumulator(pos);
 		}
@@ -571,6 +605,10 @@ class FeatureTransformer {
 		for (IndexType i = 0; i < kRefreshTriggers.size(); ++i) {
 			Features::IndexList active_indices[2];
 			RawFeatures::AppendActiveIndices(pos, kRefreshTriggers[i], active_indices);
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			if (i == 0) g_ft_stat.n_refresh++;
+			g_ft_stat.rows_full += active_indices[BLACK].size() + active_indices[WHITE].size();
+#endif
 			for (Color perspective : {BLACK, WHITE}) {
 #if defined(VECTOR)
 				if (i == 0) {
@@ -618,6 +656,15 @@ class FeatureTransformer {
 			Features::IndexList removed_indices[2], added_indices[2];
 			bool                reset[2];
 			RawFeatures::AppendChangedIndices(pos, kRefreshTriggers[i], removed_indices, added_indices, reset);
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			if (i == 0) g_ft_stat.n_update++;
+			for (Color pc : {BLACK, WHITE}) {
+				const uint64_t rows = removed_indices[pc].size() + added_indices[pc].size();
+				// ★reset は王移動。added が全 active になるので「全再構築」に数える
+				if (reset[pc]) { g_ft_stat.n_reset++; g_ft_stat.rows_full += rows; }
+				else           { g_ft_stat.rows_inc += rows; }
+			}
+#endif
 			for (Color perspective : {BLACK, WHITE}) {
 #if defined(VECTOR)
 				constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));

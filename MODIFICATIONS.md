@@ -97,3 +97,25 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   ★実装上の注意: ゲート本体は `noinline`。inline 展開させると `evaluate()` から
   accumulator 更新までの codegen が変わり、**ゲート無効時 (`GateE=0`) でも**探索開始直後に
   アクセス違反で落ちる (2026-08-16 実測)。計測コードは呼び出し境界で切ること。
+- `source/eval/nnue/nnue_feature_transformer.h` + `evaluate_nnue.cpp`:
+  **FT メモリトラフィックの内訳カウンタ** (`ENABLE_FT_TRAFFIC_STAT`, task#45 / report/49)。
+  accumulator の行読みが「差分更新」「差分連鎖の断絶による全再構築」「王移動による
+  perspective 単位の再構築」のどれに使われているかを**行数で**数える。
+  環境変数 `FT_TRAFFIC_STATS` にファイル名を指定するとプロセス終了時に追記する。
+  **定義したビルドにのみ存在する。配布ビルドには含まれない。**
+  配布ビルドとの同一性 (score/bestmove/nodes) を 8/8 局面で確認済み。
+
+## 探索の改変 (対局挙動に影響しうるもの)
+
+- `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: **accumulator 差分連鎖の維持**
+  (`ENABLE_ACC_CHAIN_FIX`, task#45 / report/49)。
+  `search()` / `qsearch()` の王手局面 (`ss->inCheck`) は `evaluate()` を呼ばずに
+  指し手ループへ飛ぶため、その局面の accumulator が未計算のまま子へ降りる。
+  `UpdateAccumulatorIfPossible()` は **1 手前しか遡らない**ので、子は全再構築
+  (両手番で ~76 行) に落ちる。ここで `Eval::evaluate_with_no_return()` を呼んで
+  差分だけ進めておくと、子は差分 (~4 行) で済む。
+  実測: 全再構築の回数 860,095 → 12,883 (−98.5%)、FT の総行読み −27.6%。
+  **評価値を返さないので探索結果は変わらない** (同一局面・同一ノード数で
+  score/bestmove/nodes が完全一致することを確認済み。transform 回数も 10,106,882 で一致)。
+  ★ 2026-08-19 時点では**既定で無効**。NPS 改善が負荷下の測定では有意でなく
+  (比 1.0231 / ノイズ床 ±2.78%)、アイドル再測の結果を見てから既定化を判断する。

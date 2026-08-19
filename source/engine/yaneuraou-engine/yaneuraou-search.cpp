@@ -2864,6 +2864,16 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
 
 		ss->staticEval = eval = (ss - 2)->staticEval;
         improving             = false;
+
+#if defined(ENABLE_ACC_CHAIN_FIX)
+		// ★差分連鎖の維持 (task#45 / report/49)
+		//   王手局面では evaluate() を呼ばないので accumulator が未計算のまま
+		//   子へ降りる。UpdateAccumulatorIfPossible は **1 手前しか遡らない**ので、
+		//   子は全再構築 (両手番で ~76 行) に落ちる。
+		//   ここで差分だけ進めておけば、子は差分 (~4 行) で済む。
+		//   ★評価値を返さないので探索結果は変わらない (同一性チェックで確認すること)。
+		Eval::evaluate_with_no_return(pos);
+#endif
         goto moves_loop;
     }
     else if (excludedMove)
@@ -4554,6 +4564,12 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 				alphaとは区別しなければならない。
 		*/
         bestValue = futilityBase = -VALUE_INFINITE;
+
+#if defined(ENABLE_ACC_CHAIN_FIX)
+		// ★差分連鎖の維持 (search 側と同じ理由)。qsearch の王手局面も evaluate() を
+		//   呼ばないので、ここで切れると評価する子が全再構築に落ちる。
+		Eval::evaluate_with_no_return(pos);
+#endif
 	}
     else
     {
