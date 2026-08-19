@@ -60,6 +60,11 @@
 // halfkp_512x2-16-32型
 #include "architectures/halfkp_512x2-16-32.h"
 
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32)
+
+// halfkp+threat_512x2-16-32型 (task#52 Phase-1: 利き当たり特徴の連結)
+#include "architectures/halfkp_threat_512x2-16-32.h"
+
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
 
 // halfkp_512x2-32-32型 (L2=32: L2 がタダか検証用)

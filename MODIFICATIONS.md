@@ -124,3 +124,10 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   Stockfish PR #5556 の将棋版。materialKey で index する補正履歴を
   correction_value / update_correction_history に追加。
   **定義したビルドにのみ存在する。既定無効。Elo 判定中 (採用が決まるまで配布ビルドに含まれない)。**
+- `source/eval/nnue/features/threat.h/.cpp` (新規) + `architectures/halfkp_threat_512x2-16-32.h` (新規)
+  + `nnue_architecture.h` + `Makefile`: **Threat 入力特徴** (task#52 / report/51)。
+  駒の実利きが駒に当たっている関係 (玉除外、9クラス×敵味方、空盤幾何圧縮、216,720 次元) を
+  HalfKP に連結した実験アーキ `YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32`。
+  bullet-shogi 側 (`shogi_halfkp_threat.rs`) と同一 index 仕様で、テーブルの FNV-1a
+  チェックサム (0x30f7eea2484893cd) を両実装に焼き込み、不一致なら起動時に即死する。
+  差分更新は未実装 (kAnyPieceMoved で毎手全再構築 = 実験判定用)。**配布ビルドには含まれない。**

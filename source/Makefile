@@ -479,6 +479,8 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_16_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_16_32
+		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32)
+			CPPFLAGS += -DEVAL_NNUE_HALFKP_THREAT_512X2_16_32
 
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_32_32
@@ -539,6 +541,7 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 		eval/nnue/features/half_relative_kp.cpp                         \
 		eval/nnue/features/half_kpe9.cpp                                \
 		eval/nnue/features/pe9.cpp                                      \
+		eval/nnue/features/threat.cpp                                   \
 		engine/yaneuraou-engine/yaneuraou-search.cpp
 
 	ifneq (,$(findstring em++,$(COMPILER)))
