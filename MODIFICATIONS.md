@@ -119,3 +119,8 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   score/bestmove/nodes が完全一致することを確認済み。transform 回数も 10,106,882 で一致)。
   ★ 2026-08-19 時点では**既定で無効**。NPS 改善が負荷下の測定では有意でなく
   (比 1.0231 / ノイズ床 ±2.78%)、アイドル再測の結果を見てから既定化を判断する。
+- `source/history.h` + `source/engine/yaneuraou-engine/yaneuraou-search.cpp`:
+  **material correction history** (`ENABLE_MATERIAL_CORRHIST`, task#51 / report/50)。
+  Stockfish PR #5556 の将棋版。materialKey で index する補正履歴を
+  correction_value / update_correction_history に追加。
+  **定義したビルドにのみ存在する。既定無効。Elo 判定中 (採用が決まるまで配布ビルドに含まれない)。**
