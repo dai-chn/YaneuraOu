@@ -34,6 +34,19 @@
 
 namespace YaneuraOu {
 
+// ============================================================
+//   限界コストプローブ: TT probe (task#45 / report/49 §4.6)
+// ============================================================
+// ★TT の probe を 2 回呼び、NPS の落ちから TT のランダムアクセスの限界コストを測る。
+//   probe は冪等 (2 回目も同じ entry を返し、generation の refresh も同じ値) なので
+//   **探索は変わらない**。ビルド後に score/bestmove/nodes の同一性を必ず確認すること。
+#if defined(ENABLE_PROBE_TTPROBE_TWICE)
+namespace { volatile int g_tt_probe_sink = 0; }
+    #define PROBE_TT(KEY)  do { auto _r = tt.probe(KEY, pos); g_tt_probe_sink = int(std::get<0>(_r)); } while (0)
+#else
+    #define PROBE_TT(KEY)  do {} while (0)
+#endif
+
 using namespace Search;
 using namespace Eval;  // Eval::PieceValue
 
@@ -2463,6 +2476,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
 	*/
 
     posKey                         = pos.key();
+    PROBE_TT(posKey);
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey, pos);
 
     // Need further processing of the saved data
@@ -4502,6 +4516,7 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
     // -----------------------
 
     posKey                         = pos.key();
+    PROBE_TT(posKey);
     auto [ttHit, ttData, ttWriter] = tt.probe(posKey, pos);
 
     // Need further processing of the saved data

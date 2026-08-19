@@ -12,6 +12,38 @@
 namespace YaneuraOu {
 using namespace Eval; // Eval::PieceValue
 
+// ============================================================
+//   限界コストプローブ (task#45 / report/49 §4.6)
+// ============================================================
+// ★何をしているか: ある成分だけを **2 回** 実行させ、NPS の落ちからその成分の
+//   「限界コスト」を測る。値も木も変わらないので **探索は完全に不変**で、
+//   増えるのはその成分の時間だけ:  time' = time x (1 + s)  →  s = 1/NPS比 - 1
+//
+// ★測っているのは「シェア」でなく **限界コスト** = 「それをタダにしたら何が得られるか」。
+//   report/23 で密層が FT のキャッシュミス待ちの裏に隠れ MAC 50% が wall-clock 2% に
+//   なったように、**隠れている成分は 2 回やらせても落ちない** — それが正しい答えになる。
+//
+//   ENABLE_PROBE_MOVEGEN_TWICE … 指し手生成 (MoveList の構築)
+//   ENABLE_PROBE_SCORE_TWICE   … オーダリングのスコア付け (history テーブル群の読み)
+//
+// ★どちらも読み取り専用 or 冪等な書き込みなので探索結果は変わらない。
+//   ビルド後に必ず score/bestmove/nodes の同一性を確認すること。
+#if defined(ENABLE_PROBE_MOVEGEN_TWICE) || defined(ENABLE_PROBE_SCORE_TWICE)
+namespace { volatile int g_probe_sink = 0; }   // 最適化で消されないための shink
+#endif
+
+#if defined(ENABLE_PROBE_MOVEGEN_TWICE)
+    #define PROBE_GEN(T)       do { MoveList<T> _p(pos); g_probe_sink = int(_p.size()); } while (0)
+#else
+    #define PROBE_GEN(T)       do {} while (0)
+#endif
+
+#if defined(ENABLE_PROBE_SCORE_TWICE)
+    #define PROBE_SCORE(T, ML) do { g_probe_sink = int(score<T>(ML) - moves); } while (0)
+#else
+    #define PROBE_SCORE(T, ML) do {} while (0)
+#endif
+
 namespace {
   
 // -----------------------
@@ -476,23 +508,29 @@ top:
     case QCAPTURE_INIT : {
 
 #if STOCKFISH
+        PROBE_GEN(CAPTURES);
         MoveList<CAPTURES> ml(pos);
 
         cur = endBadCaptures = moves;
 
         // 駒を捕獲する指し手に対してオーダリングのためのスコアをつける
+        PROBE_SCORE(CAPTURES, ml);
         endCur = endCaptures = score<CAPTURES>(ml);
 #else
         if (generate_all_legal_moves)
         {
+            PROBE_GEN(CAPTURES_ALL);
             MoveList<CAPTURES_ALL> ml(pos);
             cur = endBadCaptures = moves;
+            PROBE_SCORE(CAPTURES_ALL, ml);
             endCur = endCaptures = score<CAPTURES_ALL>(ml);
         }
         else
         {
+            PROBE_GEN(CAPTURES);
             MoveList<CAPTURES> ml(pos);
             cur = endBadCaptures = moves;
+            PROBE_SCORE(CAPTURES, ml);
             endCur = endCaptures = score<CAPTURES>(ml);
         }
 #endif
@@ -563,19 +601,25 @@ top:
 			*/
 
 #if STOCKFISH
+            PROBE_GEN(QUIETS);
             MoveList<QUIETS> ml(pos);
 
+            PROBE_SCORE(QUIETS, ml);
             endCur = endGenerated = score<QUIETS>(ml);
 #else
 			if (generate_all_legal_moves)
 			{
+                PROBE_GEN(QUIETS_ALL);
                 MoveList<QUIETS_ALL> ml(pos);
+                PROBE_SCORE(QUIETS_ALL, ml);
                 endCur = endGenerated = score<QUIETS_ALL>(ml);
 			}
 			else
 			{
+                PROBE_GEN(QUIETS);
                 MoveList<QUIETS> ml(pos);
                 // 駒を捕獲しない指し手に対してオーダリングのためのスコアをつける
+                PROBE_SCORE(QUIETS, ml);
                 endCur = endGenerated = score<QUIETS>(ml);
 			}
             // ⚠ ここ⇑、CAPTURE_INITで生成した指し手に歩の成りの指し手が
@@ -648,22 +692,28 @@ top:
 	// 王手回避手の生成
     case EVASION_INIT : {
 #if STOCKFISH
+        PROBE_GEN(EVASIONS);
         MoveList<EVASIONS> ml(pos);
 
         cur    = moves;
+        PROBE_SCORE(EVASIONS, ml);
         endCur = endGenerated = score<EVASIONS>(ml);
 #else
 		if (generate_all_legal_moves)
 		{
+            PROBE_GEN(EVASIONS_ALL);
             MoveList<EVASIONS_ALL> ml(pos);
             cur    = moves;
+            PROBE_SCORE(EVASIONS_ALL, ml);
             endCur = endGenerated = score<EVASIONS_ALL>(ml);
 		}
 		else
 		{
+            PROBE_GEN(EVASIONS);
             MoveList<EVASIONS> ml(pos);
             cur    = moves;
 			// 王手を回避する指し手に対してオーダリングのためのスコアをつける
+            PROBE_SCORE(EVASIONS, ml);
             endCur = endGenerated = score<EVASIONS>(ml);
 		}
 #endif
