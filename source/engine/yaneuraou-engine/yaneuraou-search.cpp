@@ -47,6 +47,20 @@ namespace { volatile int g_tt_probe_sink = 0; }
     #define PROBE_TT(KEY)  do {} while (0)
 #endif
 
+// 限界コストプローブ: mate_1ply / gives_check (どちらも純関数なので 2 回呼びは探索不変)
+#if defined(ENABLE_PROBE_MATE1_TWICE)
+namespace { volatile int g_mate1_sink = 0; }
+    #define PROBE_MATE1(POS)      do { g_mate1_sink = int(Mate::mate_1ply(POS).to_u16()); } while (0)
+#else
+    #define PROBE_MATE1(POS)      do {} while (0)
+#endif
+#if defined(ENABLE_PROBE_GIVESCHECK_TWICE)
+namespace { volatile int g_gc_sink = 0; }
+    #define PROBE_GIVESCHECK(POS, MV)  do { g_gc_sink = int((POS).gives_check(MV)); } while (0)
+#else
+    #define PROBE_GIVESCHECK(POS, MV)  do {} while (0)
+#endif
+
 using namespace Search;
 using namespace Eval;  // Eval::PieceValue
 
@@ -1975,6 +1989,7 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
 
 void Search::YaneuraOuWorker::do_move(Position & pos, const Move move, StateInfo& st,
                                         Stack* const ss) {
+    PROBE_GIVESCHECK(pos, move);
     do_move(pos, move, st, pos.gives_check(move), ss);
 }
 
@@ -2773,6 +2788,7 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
     {
         if (!ss->inCheck)
         {
+            PROBE_MATE1(pos);
             move = Mate::mate_1ply(pos);
 
             if (move != Move::none())
@@ -3435,6 +3451,7 @@ moves_loop:  // When in check, search starts here
         movedPiece = pos.moved_piece(move);
 
         // 今回の指し手で王手になるかどうか
+        PROBE_GIVESCHECK(pos, move);
         givesCheck = pos.gives_check(move);
 
         // Calculate new depth for this move
@@ -4657,7 +4674,8 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
                 //    play_time = b6000 ,  538 - 23 - 439(55.07% R35.33) [2016/08/19]
 
                 // 1手詰めなのでこの次のnodeで(指し手がなくなって)詰むという解釈
-                move = Mate::mate_1ply(pos);
+                PROBE_MATE1(pos);
+            move = Mate::mate_1ply(pos);
                 if (move != Move::none())
                 {
                     bestValue = mate_in(ss->ply + 1);
@@ -4785,6 +4803,7 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 
 		//  局面を進める前の枝刈り
 
+        PROBE_GIVESCHECK(pos, move);
         givesCheck = pos.gives_check(move);
         capture    = pos.capture_stage(move);
 
