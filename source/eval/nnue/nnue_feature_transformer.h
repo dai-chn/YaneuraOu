@@ -332,9 +332,25 @@ class FeatureTransformer {
 		for (IndexType p = 0; p < 2; ++p) {
 			const IndexType offset = (kHalfDimensions / 2) * p;
 
+			// ★複数 refresh trigger (halfka2t 等) では平面を全て合算する。
+			//   平面 0 固定読みだと threat 等の追加平面が出力に乗らない (task#54 で実害)。
 			const vec_t* in0 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][0][0]));
 			const vec_t* in1 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][0][kHalfDimensions / 2]));
 			vec_t* out = reinterpret_cast<vec_t*>(output + offset);
+			auto load0 = [&](IndexType idx) {
+				vec_t v = in0[idx];
+				for (IndexType t = 1; t < kRefreshTriggers.size(); ++t)
+					v = vec_add_16(v, reinterpret_cast<const vec_t*>(
+						&(accumulation[perspectives[p]][t][0]))[idx]);
+				return v;
+			};
+			auto load1 = [&](IndexType idx) {
+				vec_t v = in1[idx];
+				for (IndexType t = 1; t < kRefreshTriggers.size(); ++t)
+					v = vec_add_16(v, reinterpret_cast<const vec_t*>(
+						&(accumulation[perspectives[p]][t][kHalfDimensions / 2]))[idx]);
+				return v;
+			};
 
 			constexpr int shift =
 #if defined(USE_SSE2)
@@ -346,11 +362,11 @@ class FeatureTransformer {
 			for (IndexType j = 0; j < NumOutputChunks; ++j)
 			{
 				const vec_t sum0a =
-					vec_slli_16(vec_max_16(vec_min_16(in0[j * 2 + 0], One), Zero), shift);
+					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 0), One), Zero), shift);
 				const vec_t sum0b =
-					vec_slli_16(vec_max_16(vec_min_16(in0[j * 2 + 1], One), Zero), shift);
-				const vec_t sum1a = vec_min_16(in1[j * 2 + 0], One);
-				const vec_t sum1b = vec_min_16(in1[j * 2 + 1], One);
+					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 1), One), Zero), shift);
+				const vec_t sum1a = vec_min_16(load1(j * 2 + 0), One);
+				const vec_t sum1b = vec_min_16(load1(j * 2 + 1), One);
 
 				const vec_t pa = vec_mulhi_16(sum0a, sum1a);
 				const vec_t pb = vec_mulhi_16(sum0b, sum1b);
@@ -369,6 +385,10 @@ class FeatureTransformer {
 			{
 				BiasType sum0 = accumulation[perspectives[p]][0][j];
 				BiasType sum1 = accumulation[perspectives[p]][0][j + kHalfDimensions / 2];
+				for (IndexType t = 1; t < kRefreshTriggers.size(); ++t) {
+					sum0 += accumulation[perspectives[p]][t][j];
+					sum1 += accumulation[perspectives[p]][t][j + kHalfDimensions / 2];
+				}
 				sum0 = std::clamp<BiasType>(sum0, 0, 127 * 2);
 				sum1 = std::clamp<BiasType>(sum1, 0, 127 * 2);
 				output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / 512);
