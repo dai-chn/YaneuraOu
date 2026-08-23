@@ -16,6 +16,7 @@
 #include "../../../position.h"
 #include "../../../bitboard.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -204,10 +205,48 @@ const Tables& tables() {
     return t;
 }
 
+// (attacker, victim) 対 -> 特徴 index (視点変換込み、HM ミラー無し)。
+// AppendActiveIndices / AppendChangedIndices で共有 — 経路差ゼロの保証。
+inline uint32_t pair_index(const Tables& T, Color perspective,
+                           Color attacker_color, int ac, Square from,
+                           Color target_color, int dc, Square to) {
+    const Square from_n = (perspective == BLACK) ? from : Inv(from);
+    const Square to_n   = (perspective == BLACK) ? to   : Inv(to);
+    const Color oriented = (perspective == BLACK) ? attacker_color : ~attacker_color;
+    const int as = (attacker_color != perspective) ? 1 : 0;
+    const int ds = (target_color != perspective) ? 1 : 0;
+    const int pat = attack_pattern_id(ac, oriented);
+    const uint8_t ord = T.attack_order[pat][from_n][to_n];
+    ASSERT_LV3(ord != 0xFF);
+    return T.pair_base[as * 162 + ac * 18 + ds * 9 + dc] + T.from_offset[pat][from_n] + ord;
+}
+
 }  // namespace
+
+#if defined(THREAT_DIFF_STATS)
+// 診断用カウンタ (研究ビルド限定)。atexit で stderr に出す。
+#include <atomic>
+namespace {
+std::atomic<uint64_t> g_refresh_calls{0}, g_changed_calls{0}, g_changed_rows{0},
+    g_prev_pairs{0}, g_now_pairs{0};
+struct StatsPrinter {
+    ~StatsPrinter() {
+        std::fprintf(stderr,
+            "[threat-diff-stats] refresh=%llu changed=%llu rows/changed=%.2f prev+now_pairs/changed=%.2f" "\n",
+            (unsigned long long)g_refresh_calls.load(), (unsigned long long)g_changed_calls.load(),
+            g_changed_calls ? double(g_changed_rows) / double(g_changed_calls) : 0.0,
+            g_changed_calls ? double(g_prev_pairs + g_now_pairs) / double(g_changed_calls) : 0.0);
+    }
+} g_stats_printer;
+}
+#define THREAT_STAT(x) x
+#else
+#define THREAT_STAT(x)
+#endif
 
 // 特徴量のうち、値が 1 であるインデックスのリストを取得する
 void Threat::AppendActiveIndices(const Position& pos, Color perspective, IndexList* active) {
+    THREAT_STAT(g_refresh_calls.fetch_add(1, std::memory_order_relaxed);)
     const Tables& T = tables();
     const Bitboard occ = pos.pieces();
 
@@ -232,28 +271,183 @@ void Threat::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
                 continue;   // 玉は被弾側からも除外
             const Color target_color = color_of(tpc);
 
-            // 視点変換 (HM ミラー無し)
-            const Square from_n = (perspective == BLACK) ? from : Inv(from);
-            const Square to_n   = (perspective == BLACK) ? to   : Inv(to);
-            const Color oriented = (perspective == BLACK) ? attacker_color : ~attacker_color;
-            const int as = (attacker_color != perspective) ? 1 : 0;
-            const int ds = (target_color != perspective) ? 1 : 0;
-
-            const int pat = attack_pattern_id(ac, oriented);
-            const uint8_t ord = T.attack_order[pat][from_n][to_n];
-            ASSERT_LV3(ord != 0xFF);
-            const uint32_t idx = T.pair_base[as * 162 + ac * 18 + ds * 9 + dc]
-                               + T.from_offset[pat][from_n] + ord;
+            const uint32_t idx = pair_index(T, perspective, attacker_color, ac, from,
+                                            target_color, dc, to);
             ASSERT_LV3(idx < kDimensions);
             active->push_back(IndexType(idx));
         }
     }
 }
 
-// kAnyPieceMoved は feature_set 側で常に reset 扱いになるため、ここは呼ばれない
-void Threat::AppendChangedIndices(const Position& /*pos*/, Color /*perspective*/,
-                                  IndexList* /*removed*/, IndexList* /*added*/) {
-    ASSERT_LV1(false);
+// 差分更新 (task#37, report/51 §7.2)。
+//
+// 方針: 「影響を受けた attacker」の被害者集合を prev/now 両占有で丸ごと再列挙し、
+// 対称差分を removed/added にする。場合分け (成り/駒打ち/取り/開き当たり/遮断) を
+// 集合演算に押し込むことで、ケース漏れバグを構造的に避ける。
+//
+// 影響 attacker = {動いた駒 (旧/新), 取られた駒} ∪ {from/to に (prev/now いずれかの
+// 占有で) 利きを付けている駒}。スライダーの経路が from/to を跨ぐ場合、その駒は必ず
+// from/to のマス自体に利きを持つ (途中マスにも利きが乗る) ので、この集合で完全。
+// 桂・非スライダーは遮断の影響を受けないので from/to への利きが変わる駒のみで足りる。
+//
+// prev 側の駒配置の差は「動いた駒 (from に旧型)」「取られた駒 (to)」だけなので、
+// 他の駒は現在の盤面 (pos.piece_on) をそのまま使い、from/to のみ読み替える。
+// 駒レベルの対 (視点非依存)。index への写像は視点ごとに行う。
+struct ThreatPair {
+    uint8_t attacker_pc;   // Piece
+    uint8_t attacker_sq;
+    uint8_t victim_pc;     // Piece
+    uint8_t victim_sq;
+};
+
+// 視点間キャッシュ: BLACK 呼び出しで駒レベル差分を計算し、直後の WHITE 呼び出しで再利用。
+// StateInfo のアドレスは使い回されるので (key, lastMove) も照合する。
+struct ThreatDiffCache {
+    const void* st = nullptr;
+    uint64_t key = 0;
+    uint32_t move = 0;
+    int n_removed = 0, n_added = 0;
+    ThreatPair removed[128];
+    ThreatPair added[128];
+};
+static thread_local ThreatDiffCache t_diff_cache;
+
+static void collect_piece_diff(const Position& pos, ThreatDiffCache& C);
+
+void Threat::AppendChangedIndices(const Position& pos, Color perspective,
+                                  IndexList* removed, IndexList* added) {
+    THREAT_STAT(g_changed_calls.fetch_add(1, std::memory_order_relaxed);)
+    const Tables& T = tables();
+    const StateInfo* st = pos.state();
+    const Move m = st->lastMove;
+    // dirty_num == 0 (null move) は feature_set 側で弾かれるのでここには来ない
+    ASSERT_LV3(m.to_u32() != 0);
+
+    // ---- 視点間キャッシュの照合 (COLOR 順で BLACK が先に呼ばれる) ----
+    ThreatDiffCache& C = t_diff_cache;
+    const bool cache_hit = (C.st == (const void*)st && C.key == (uint64_t)st->key()
+                            && C.move == m.to_u32());
+    if (!cache_hit) {
+        C.st = (const void*)st;
+        C.key = (uint64_t)st->key();
+        C.move = m.to_u32();
+        C.n_removed = C.n_added = 0;
+        collect_piece_diff(pos, C);
+    }
+    // ---- 駒レベル差分 -> この視点の index ----
+    for (int i = 0; i < C.n_removed; ++i) {
+        const ThreatPair& pr = C.removed[i];
+        const Piece apc = Piece(pr.attacker_pc);
+        const Piece vpc = Piece(pr.victim_pc);
+        removed->push_back(IndexType(pair_index(T, perspective,
+            color_of(apc), threat_class_of(type_of(apc)), Square(pr.attacker_sq),
+            color_of(vpc), threat_class_of(type_of(vpc)), Square(pr.victim_sq))));
+    }
+    for (int i = 0; i < C.n_added; ++i) {
+        const ThreatPair& pr = C.added[i];
+        const Piece apc = Piece(pr.attacker_pc);
+        const Piece vpc = Piece(pr.victim_pc);
+        added->push_back(IndexType(pair_index(T, perspective,
+            color_of(apc), threat_class_of(type_of(apc)), Square(pr.attacker_sq),
+            color_of(vpc), threat_class_of(type_of(vpc)), Square(pr.victim_sq))));
+    }
+    THREAT_STAT(g_changed_rows.fetch_add(C.n_removed + C.n_added, std::memory_order_relaxed);)
+}
+
+// 駒レベルの threat 差分を C.removed/C.added に収集する (視点非依存の 1 回だけの仕事)。
+static void collect_piece_diff(const Position& pos, ThreatDiffCache& C) {
+    const StateInfo* st = pos.state();
+    const Move m = st->lastMove;
+    const Square to = m.to_sq();
+    const bool drop = m.is_drop();
+    const Square from = drop ? SQ_NB : m.from_sq();
+    const Piece moved_now = pos.piece_on(to);
+    const Piece captured = st->capturedPiece;   // 無ければ NO_PIECE
+    const Color mc = color_of(moved_now);
+    const PieceType pt_now = type_of(moved_now);
+    const PieceType pt_prev = m.is_promote() ? PieceType(pt_now - PIECE_PROMOTE) : pt_now;
+    const Piece moved_prev = make_piece(mc, pt_prev);
+
+    const Bitboard occ_now = pos.pieces();
+    Bitboard occ_prev = occ_now;
+    if (captured == NO_PIECE)
+        occ_prev ^= Bitboard(to);      // 取りでなければ prev は to が空
+    if (!drop)
+        occ_prev |= Bitboard(from);    // prev は from に駒
+
+    // prev 視点での被弾駒の解決: from -> 動いた駒 (旧型)、to -> 取られた駒、他は現盤面
+    auto prev_piece_on = [&](Square v) -> Piece {
+        if (!drop && v == from) return moved_prev;
+        if (v == to) return captured;          // occ_prev に to が立つのは取りの時のみ
+        return pos.piece_on(v);
+    };
+
+    // 駒レベル対の収集バッファ (影響 attacker ~≤16 × 被害者 ~≤17 で十分な上限)
+    constexpr int kCap = 512;
+    uint64_t prev_k[kCap]; ThreatPair prev_p[kCap]; int n_prev = 0;
+    uint64_t now_k[kCap];  ThreatPair now_p[kCap];  int n_now = 0;
+
+    auto emit_pairs = [&](Piece apc, Square asq, const Bitboard& occ, bool prev_side,
+                          uint64_t* keys, ThreatPair* out, int& n) {
+        const int ac = threat_class_of(type_of(apc));
+        if (ac < 0)
+            return;                    // 玉は攻撃側から除外
+        Bitboard att = effects_from(apc, asq, occ) & occ;
+        while (att) {
+            const Square v = att.pop();
+            const Piece vpc = prev_side ? prev_piece_on(v) : pos.piece_on(v);
+            ASSERT_LV3(vpc != NO_PIECE);
+            const int dc = threat_class_of(type_of(vpc));
+            if (dc < 0)
+                continue;              // 玉は被弾側からも除外
+            ASSERT_LV1(n < kCap);
+            out[n] = ThreatPair{uint8_t(apc), uint8_t(asq), uint8_t(vpc), uint8_t(v)};
+            keys[n] = (uint64_t(apc) << 24) | (uint64_t(asq) << 16)
+                    | (uint64_t(vpc) << 8) | uint64_t(v);
+            ++n;
+        }
+    };
+
+    // --- 影響 attacker の列挙 ---
+    // (a) 動いた駒: prev = from に旧型 / now = to に新型
+    if (!drop)
+        emit_pairs(moved_prev, from, occ_prev, /*prev=*/true, prev_k, prev_p, n_prev);
+    emit_pairs(moved_now, to, occ_now, /*prev=*/false, now_k, now_p, n_now);
+    // (b) 取られた駒: prev のみ (to に居た)
+    if (captured != NO_PIECE)
+        emit_pairs(captured, to, occ_prev, /*prev=*/true, prev_k, prev_p, n_prev);
+    // (c) from/to に利きを付けている他の駒 (現在の盤面上の駒。動いた駒 = to は除外)
+    Bitboard aff = pos.attackers_to(to, occ_now) | pos.attackers_to(to, occ_prev);
+    if (!drop)
+        aff |= pos.attackers_to(from, occ_now) | pos.attackers_to(from, occ_prev);
+    aff &= occ_now;
+    aff &= ~Bitboard(to);
+    while (aff) {
+        const Square s = aff.pop();
+        const Piece apc = pos.piece_on(s);   // prev でも同じ駒・同じマス
+        emit_pairs(apc, s, occ_prev, /*prev=*/true, prev_k, prev_p, n_prev);
+        emit_pairs(apc, s, occ_now, /*prev=*/false, now_k, now_p, n_now);
+    }
+
+    THREAT_STAT(g_prev_pairs.fetch_add(n_prev, std::memory_order_relaxed);
+                g_now_pairs.fetch_add(n_now, std::memory_order_relaxed);)
+    // --- 対称差分 (キー順に整列して merge) ---
+    // 小配列の挿入ソート同等: std::sort で十分軽い
+    int ord_prev[kCap], ord_now[kCap];
+    for (int i = 0; i < n_prev; ++i) ord_prev[i] = i;
+    for (int j = 0; j < n_now; ++j) ord_now[j] = j;
+    std::sort(ord_prev, ord_prev + n_prev, [&](int a, int b) { return prev_k[a] < prev_k[b]; });
+    std::sort(ord_now, ord_now + n_now, [&](int a, int b) { return now_k[a] < now_k[b]; });
+    int i = 0, j = 0;
+    while (i < n_prev || j < n_now) {
+        if (j >= n_now || (i < n_prev && prev_k[ord_prev[i]] < now_k[ord_now[j]])) {
+            ASSERT_LV1(C.n_removed < 128);
+            C.removed[C.n_removed++] = prev_p[ord_prev[i++]];
+        } else if (i >= n_prev || now_k[ord_now[j]] < prev_k[ord_prev[i]]) {
+            ASSERT_LV1(C.n_added < 128);
+            C.added[C.n_added++] = now_p[ord_now[j++]];
+        } else { ++i; ++j; }           // 両方に居る対 = 不変
+    }
 }
 
 } // namespace Eval::NNUE::Features

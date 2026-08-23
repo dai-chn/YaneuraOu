@@ -42,8 +42,16 @@ class Threat {
   // 同時にアクティブになりうる最大特徴数 (bullet 側と同じ安全上限。実測は ~38)
   static constexpr IndexType kMaxActiveDimensions = 320;
 
-  // 差分計算の代わりに全計算を行うタイミング: 毎手 (ナイーブ実装)
+  // 差分計算の代わりに全計算を行うタイミング。
+  // 既定は kNone = 常に差分計算 (task#37)。threat の index は玉位置に依存しないので
+  // リフレッシュ不要、毎手 AppendChangedIndices で ~5.3 行/手だけ更新する。
+  // (素朴全再構築は NPS 0.3988× と実測され不可 — report/51 §7.3)
+  // 検証用に -DTHREAT_NAIVE_REBUILD で旧挙動 (毎手全再構築) に戻せる。
+#if defined(THREAT_NAIVE_REBUILD)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+#else
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
+#endif
 
   // 特徴量のうち、値が 1 であるインデックスのリストを取得する
   static void AppendActiveIndices(const Position& pos, Color perspective,

@@ -131,3 +131,30 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   bullet-shogi 側 (`shogi_halfkp_threat.rs`) と同一 index 仕様で、テーブルの FNV-1a
   チェックサム (0x30f7eea2484893cd) を両実装に焼き込み、不一致なら起動時に即死する。
   差分更新は未実装 (kAnyPieceMoved で毎手全再構築 = 実験判定用)。**配布ビルドには含まれない。**
+
+## SFNN + Threat 実験アーキ (halfka2t) の追加 (2026-08-22, task#54)
+
+- `source/eval/nnue/features/threat_ka2.h` (新規、ヘッダのみ):
+  `ThreatKa2` — Threat (threat.h) の HalfKA2 ペア用バリアント。index 計算・次元・
+  trigger は Threat を継承し、kHashValue だけ 0xB52D879C に変更
+  (bullet 側 composite 0x0b6b1eec = FEATURE_HASH_HALFKA2 ^ "THRT" に合わせた逆算値)。
+- `source/eval/nnue/architectures/nnue_arch_gen.py`: 入力特徴 `halfka2t` を追加
+  (`FeatureSet<ThreatKa2, HalfKA2<kFriend>>` — FeatureSet は Tail が offset 0 なので
+  bullet レイアウト [KA2][Threat] と一致)。
+  ビルド例: `YANEURAOU_EDITION=YANEURAOU_ENGINE_NNUE_SFNNwoPSQT_halfka2t_1024-7-64-ls9`。
+  **配布ビルドには含まれない** (研究判定用)。
+
+## Threat 差分更新 (2026-08-22, task#37)
+
+- `source/eval/nnue/features/threat.h`: kRefreshTrigger を kAnyPieceMoved → **kNone**
+  (常に差分計算)。-DTHREAT_NAIVE_REBUILD で旧挙動。
+- `source/eval/nnue/features/threat.cpp`: `AppendChangedIndices` 実装。
+  影響 attacker (動いた駒/取られた駒/from・to に利く駒) の被害者集合を prev/now 占有で
+  再列挙し対称差分。駒レベル差分は thread_local キャッシュで両視点共有。
+  平均 6.78 行/手 (実測)。-DTHREAT_DIFF_STATS で診断カウンタ。
+- `source/config.h`: threat edition で KEEP_LAST_MOVE を有効化 (FOR_TOURNAMENT の
+  #undef より後で再定義)。
+- **検証**: diff vs naive の固定ノード探索一致 24/24 (Windows clang) + 4/4 (Linux gcc)。
+- NPS: plain-512 比 0.3988 (naive) → **0.5314** (diff)。残余は threat FT 行 (212MB 行列)
+  のコールドフェッチが律速 (report/51 §7.4)。
+

@@ -691,6 +691,12 @@ constexpr bool pretty_jp = false;
 	#define KEEP_LAST_MOVE
 #endif
 
+// halfkp+threat (task#37): threat 特徴の差分更新 (AppendChangedIndices) が
+// 直前の指し手を必要とする。FOR_TOURNAMENT の #undef より後で再定義する。
+#if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32)
+	#define KEEP_LAST_MOVE
+#endif
+
 // ----------------------------
 //      CPU environment
 // ----------------------------
