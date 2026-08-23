@@ -190,6 +190,21 @@ elif input_feature == "halfka2":
             Features::HalfKA2<Features::Side::kFriend>>;
     """
 
+elif input_feature == "halfka2t":
+
+    # HalfKA2 + Threat (task#54)。FeatureSet<Head, Tail> は Tail が offset 0 なので
+    # <ThreatKa2, HalfKA2> の順で bullet 側レイアウト [KA2][Threat] と一致する。
+    header += f"""
+    #include "../features/half_ka2.h"
+    #include "../features/threat_ka2.h"
+    """
+
+    raw_features = f"""
+        using RawFeatures = Features::FeatureSet<
+            Features::ThreatKa2,
+            Features::HalfKA2<Features::Side::kFriend>>;
+    """
+
 elif input_feature == "halfkahm2":
 
     header += f"""
