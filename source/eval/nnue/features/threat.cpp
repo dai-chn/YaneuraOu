@@ -292,6 +292,8 @@ void Threat::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
 //
 // prev 側の駒配置の差は「動いた駒 (from に旧型)」「取られた駒 (to)」だけなので、
 // 他の駒は現在の盤面 (pos.piece_on) をそのまま使い、from/to のみ読み替える。
+#if defined(KEEP_LAST_MOVE)
+
 // 駒レベルの対 (視点非依存)。index への写像は視点ごとに行う。
 struct ThreatPair {
     uint8_t attacker_pc;   // Piece
@@ -449,6 +451,16 @@ static void collect_piece_diff(const Position& pos, ThreatDiffCache& C) {
         } else { ++i; ++j; }           // 両方に居る対 = 不変
     }
 }
+
+#else
+
+// KEEP_LAST_MOVE の無いビルド: kAnyPieceMoved (naive) に落ちるためここは呼ばれない
+void Threat::AppendChangedIndices(const Position& /*pos*/, Color /*perspective*/,
+                                  IndexList* /*removed*/, IndexList* /*added*/) {
+    ASSERT_LV1(false);
+}
+
+#endif  // defined(KEEP_LAST_MOVE)
 
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu

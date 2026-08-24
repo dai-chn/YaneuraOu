@@ -65,6 +65,11 @@
 // halfkp+threat_512x2-16-32型 (task#52 Phase-1: 利き当たり特徴の連結)
 #include "architectures/halfkp_threat_512x2-16-32.h"
 
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32)
+
+// halfkp+threatlite_512x2-16-32型 (task#59: from-drop 縮約 26,244 次元)
+#include "architectures/halfkp_threatlite_512x2-16-32.h"
+
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
 
 // halfkp_512x2-32-32型 (L2=32: L2 がタダか検証用)

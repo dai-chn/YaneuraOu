@@ -47,7 +47,8 @@ class Threat {
   // リフレッシュ不要、毎手 AppendChangedIndices で ~5.3 行/手だけ更新する。
   // (素朴全再構築は NPS 0.3988× と実測され不可 — report/51 §7.3)
   // 検証用に -DTHREAT_NAIVE_REBUILD で旧挙動 (毎手全再構築) に戻せる。
-#if defined(THREAT_NAIVE_REBUILD)
+#if defined(THREAT_NAIVE_REBUILD) || !defined(KEEP_LAST_MOVE)
+  // 差分更新は lastMove を要するため、KEEP_LAST_MOVE の無いビルドは自動で naive に落とす
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
 #else
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;

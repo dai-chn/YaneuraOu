@@ -158,3 +158,20 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - NPS: plain-512 比 0.3988 (naive) → **0.5314** (diff)。残余は threat FT 行 (212MB 行列)
   のコールドフェッチが律速 (report/51 §7.4)。
 
+
+## ThreatLite 特徴量 (2026-08-24, task#59)
+
+- `source/eval/nnue/features/threat_lite.h/.cpp` (新規):
+  `ThreatLite` — Threat の from/幾何を落とした縮約版
+  (attacker_side, attacker_class, defender_side, defender_class, to) = 26,244 次元。
+  bullet-shogi 側 `shogi_halfkp_threatlite.rs` と同一 index 仕様。
+  ★count 意味論: 同一 (pair,to) への複数攻撃は同一 index を重複 push (特徴値=攻撃駒数)。
+  当面はナイーブ全再構築 (kAnyPieceMoved)。差分化は Elo 保持率 A/B 通過後。
+- `source/eval/nnue/architectures/halfkp_threatlite_512x2-16-32.h` (新規):
+  FeatureSet<ThreatLite, HalfKP<kFriend>> の 512x2-16-32 型 (151,632 次元)。
+- `source/eval/nnue/nnue_architecture.h` / `source/Makefile`:
+  YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32 エディション追加。
+- `source/eval/nnue/features/threat.h/.cpp`: KEEP_LAST_MOVE 無しビルドを
+  自動で naive (kAnyPieceMoved) に落とすフォールバックを追加。
+- ハッシュ検証: full-threat ネット読込で期待通り拒否、差分 0x00040611 =
+  bullet 側タグ差 ("THRT"^"TLTE") と厳密一致 (= bullet export と相互整合)。
