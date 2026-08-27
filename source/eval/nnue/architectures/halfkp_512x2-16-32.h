@@ -23,12 +23,17 @@ using RawFeatures = Features::FeatureSet<
 // 変換後の入力特徴量の次元数
 constexpr IndexType kTransformedFeatureDimensions = 512;
 
+// L1 の重みスケールビット (6=QB64 従来 / 7=QB128, report/51 §7.7)。-DNNUE_L1_SCALE_BITS=7 で切替
+#ifndef NNUE_L1_SCALE_BITS
+#define NNUE_L1_SCALE_BITS 6
+#endif
+
 namespace Layers {
 
 // Define network structure
 // ネットワーク構造の定義
 using InputLayer = InputSlice<kTransformedFeatureDimensions * 2>;
-using HiddenLayer1 = ClippedReLU<AffineTransformSparseInput<InputLayer, 16>>;
+using HiddenLayer1 = ClippedReLU<AffineTransformSparseInput<InputLayer, 16, NNUE_L1_SCALE_BITS>>;
 using HiddenLayer2 = ClippedReLU<AffineTransform<HiddenLayer1, 32>>;
 using OutputLayer = AffineTransform<HiddenLayer2, 1>;
 
