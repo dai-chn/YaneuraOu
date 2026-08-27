@@ -112,7 +112,9 @@ void find_nnz(const std::int32_t* input, std::uint16_t* out, IndexType& count_ou
 
 // AffineTransform layer that takes block-sparse input
 // ブロック疎な入力を受け取るアフィン変換層
-template <typename PreviousLayer, IndexType OutputDimensions>
+// WeightScaleBits: この層の重みスケール (2^n)。既定は従来通り kWeightScaleBits (=6, QB=64)。
+// L1 (1024→16) は重みが小さく int8 QB=64 で情報が落ちるので 7 (QB=128) を使えるようにした (report/51 §7.7)。
+template <typename PreviousLayer, IndexType OutputDimensions, int WeightScaleBits = kWeightScaleBits>
 class AffineTransformSparseInput {
    public:
 	// Input/output type
@@ -125,6 +127,8 @@ class AffineTransformSparseInput {
 	// 入出力の次元数
 	static constexpr IndexType kInputDimensions       = PreviousLayer::kOutputDimensions;
 	static constexpr IndexType kOutputDimensions      = OutputDimensions;
+	// 後段の ClippedReLU がこの値でシフトする
+	static constexpr int kWeightScaleBits = WeightScaleBits;
 	static constexpr IndexType kPaddedInputDimensions = CeilToMultiple<IndexType>(kInputDimensions, kMaxSimdWidth);
 
 	// Size of forward propagation buffer used in this layer
