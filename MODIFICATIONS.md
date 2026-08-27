@@ -175,3 +175,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   自動で naive (kAnyPieceMoved) に落とすフォールバックを追加。
 - ハッシュ検証: full-threat ネット読込で期待通り拒否、差分 0x00040611 =
   bullet 側タグ差 ("THRT"^"TLTE") と厳密一致 (= bullet export と相互整合)。
+
+## 層別重みスケール + ClippedReLU 四捨五入オプション (2026-08-27, task#65)
+
+- `source/eval/nnue/layers/affine_transform.h` / `affine_transform_sparse_input.h`:
+  テンプレート引数 `WeightScaleBits` (既定 kWeightScaleBits=6) を追加し `kWeightScaleBits` を公開。
+- `source/eval/nnue/layers/clipped_relu.h`: 前段の `kWeightScaleBits` でシフト (層別)。
+  `-DNNUE_ROUND_SHIFT` で床シフトを四捨五入に (検証用オプション、既定 off)。
+- `architectures/halfkp_threat_512x2-16-32.h` / `halfkp_threatlite_512x2-16-32.h`:
+  L1 のスケールを `NNUE_L1_SCALE_BITS` (既定 6) で切替可能に (`-DNNUE_L1_SCALE_BITS=7` = QB 128)。
+- 背景: L1 (1024→16) の int8 QB=64 量子化で重みの 3〜4 割が 0 に丸められ、fp32 比 −66cp/std 70 の
+  ズレが出ていた (report/51 §7.7.1)。QB=128 で残差 p50 74→20cp。
+- ★ネットワークハッシュはスケールビットに依存しないため、q64/q128 のファイル取り違えは検出されない。
