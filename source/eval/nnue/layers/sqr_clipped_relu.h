@@ -16,7 +16,8 @@ namespace YaneuraOu {
 namespace Eval::NNUE::Layers {
 
 	// SqrClippedReLUレイヤー
-	template <IndexType InputDimensions>
+	// WeightScaleBits: 前段 affine の重みスケール (既定 6)。SFNN fc_0 の QB128 化用 (report/51 §7.7)
+	template <IndexType InputDimensions, int WeightScaleBits = kWeightScaleBits>
 	class SqrClippedReLU {
 	public:
 		// Input/output type
@@ -64,7 +65,9 @@ namespace Eval::NNUE::Layers {
 
 #if defined(USE_SSE2)
 			constexpr IndexType NumChunks = kInputDimensions / 16;
-			static_assert(kWeightScaleBits == 6);
+			// (x*x) >> (2*bits+7): mulhi が >>16 なので残り 2*bits-9 (bits=6 で 3, 7 で 5)
+			static_assert(2 * WeightScaleBits - 9 >= 0 && 2 * WeightScaleBits - 9 <= 15);
+			constexpr int kPostShift = 2 * WeightScaleBits - 9;
 
 			const auto in = reinterpret_cast<const __m128i*>(input);
 			const auto out = reinterpret_cast<__m128i*>(output);
@@ -78,8 +81,8 @@ namespace Eval::NNUE::Layers {
 				// We shift by WeightScaleBits * 2 = 12 and divide by 128
 				// which is an additional shift-right of 7, meaning 19 in total.
 				// MulHi strips the lower 16 bits so we need to shift out 3 more to match.
-				words0 = _mm_srli_epi16(_mm_mulhi_epi16(words0, words0), 3);
-				words1 = _mm_srli_epi16(_mm_mulhi_epi16(words1, words1), 3);
+				words0 = _mm_srli_epi16(_mm_mulhi_epi16(words0, words0), kPostShift);
+				words1 = _mm_srli_epi16(_mm_mulhi_epi16(words1, words1), kPostShift);
 
 				_mm_store_si128(&out[i], _mm_packs_epi16(words0, words1));
 			}
@@ -90,7 +93,7 @@ namespace Eval::NNUE::Layers {
 
 			for (IndexType i = Start; i < kInputDimensions; ++i) {
 				output[i] = static_cast<OutputType>(
-					std::min(127ll, ((long long)(input[i]) * input[i]) >> (2 * kWeightScaleBits + 7)));
+					std::min(127ll, ((long long)(input[i]) * input[i]) >> (2 * WeightScaleBits + 7)));
 			}
 		}
 

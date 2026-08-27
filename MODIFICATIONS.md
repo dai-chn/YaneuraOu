@@ -187,3 +187,7 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 背景: L1 (1024→16) の int8 QB=64 量子化で重みの 3〜4 割が 0 に丸められ、fp32 比 −66cp/std 70 の
   ズレが出ていた (report/51 §7.7.1)。QB=128 で残差 p50 74→20cp。
 - ★ネットワークハッシュはスケールビットに依存しないため、q64/q128 のファイル取り違えは検出されない。
+- SFNN 経路も層別化 (2026-08-27): `layers/clipped_relu_explicit.h` / `layers/sqr_clipped_relu.h` に
+  `WeightScaleBits` テンプレート引数 (SqrClippedReLU の SIMD 後シフトは 2*bits-9 に一般化)。
+  `architectures/nnue_arch_gen.py` と生成済み SFNN ヘッダ (halfka2/halfka2t) で fc_0 の活性を
+  `NNUE_SFNN_L1_SCALE_BITS` (既定 6) で切替、fc_0 の shortcut 出力は `>> (bits-6)` でスケール差を吸収。

@@ -282,6 +282,10 @@ if SFNN:
 
         // 各層の次元数
         constexpr IndexType kInputDims   = kTransformedFeatureDimensions;
+// fc_0 の重みスケールビット (6=QB64 従来 / 7=QB128, report/51 §7.7)。-DNNUE_SFNN_L1_SCALE_BITS=7 で切替
+#ifndef NNUE_SFNN_L1_SCALE_BITS
+#define NNUE_SFNN_L1_SCALE_BITS 6
+#endif
         constexpr IndexType kHidden1Dims = {layers[1]};
         constexpr IndexType kHidden2Dims = {layers[2]};                              
     """
@@ -325,8 +329,8 @@ if SFNN:
             // Define network structure
             // ネットワーク構造の定義
             Layers::AffineTransformSparseInputExplicit<kInputDims, kHidden1Dims + 1> fc_0;
-            Layers::ClippedReLUExplicit<kHidden1Dims + 1> ac_0;
-            Layers::SqrClippedReLU<kHidden1Dims + 1> ac_sqr_0;
+            Layers::ClippedReLUExplicit<kHidden1Dims + 1, NNUE_SFNN_L1_SCALE_BITS> ac_0;
+            Layers::SqrClippedReLU<kHidden1Dims + 1, NNUE_SFNN_L1_SCALE_BITS> ac_sqr_0;
 
             Layers::AffineTransformExplicit<kHidden1Dims * 2, kHidden2Dims> fc_1;
             Layers::ClippedReLUExplicit<kHidden2Dims> ac_1;
@@ -388,7 +392,7 @@ if SFNN:
                 fc_2.Propagate(buf.ac_1_out, buf.fc_2_out);
 
                 // add shortcut term
-                buf.fc_2_out[0] += buf.fc_0_out[kHidden1Dims];
+                buf.fc_2_out[0] += buf.fc_0_out[kHidden1Dims] >> (NNUE_SFNN_L1_SCALE_BITS - kWeightScaleBits);  // fc_0 のスケール差を吸収 (既定 6 では 0 シフト)
 
                 return buf.fc_2_out;
             }}
