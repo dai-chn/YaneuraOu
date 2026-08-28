@@ -416,6 +416,24 @@ namespace {
 
 	}  // namespace Detail
 
+	// このビルドが期待する L1 (classic) / fc_0 (SFNN) の量子化タグ "L1QB=<qb>/<i8|i16>"。
+	// L1 のスケール/型はネットワークハッシュに現れないので (report/51 §7.7)、nn.bin の
+	// description 末尾の ";L1QB=..." と照合して取り違えを拒否する。タグ無しは従来 (QB64/int8) 扱い。
+	std::string QuantTag() {
+#if defined(NNUE_SFNN_L1_SCALE_BITS)
+		constexpr int bits = NNUE_SFNN_L1_SCALE_BITS;
+#elif defined(NNUE_L1_SCALE_BITS)
+		constexpr int bits = NNUE_L1_SCALE_BITS;
+#else
+		constexpr int bits = 6;
+#endif
+#if defined(NNUE_L1_INT16)
+		return "L1QB=" + std::to_string(1 << bits) + "/i16";
+#else
+		return "L1QB=" + std::to_string(1 << bits) + "/i8";
+#endif
+	}
+
 	// テンポラリにパラメータを読み込み、共有メモリに配置する。
 	// 同じパラメータを持つ他プロセスが既に共有メモリを作成済みなら、そちらを参照する。
 	Tools::Result LoadAndShare(std::istream& stream) {
@@ -438,6 +456,21 @@ namespace {
 			sync_cout << "info string Error : NNUE hash mismatch is fatal for this build (refusing to load)." << sync_endl;
 			return Tools::ResultCode::FileMismatch;
 #endif
+		}
+		{
+			const std::string expect = QuantTag();
+			const auto p = architecture.find("L1QB=");
+			std::string got = "L1QB=64/i8";
+			if (p != std::string::npos) {
+				const auto e = architecture.find(';', p);
+				got = architecture.substr(p, e == std::string::npos ? std::string::npos : e - p);
+			}
+			if (got != expect) {
+				sync_cout << "info string Error : NNUE quantisation tag mismatch: file " << got
+					<< (p == std::string::npos ? " (untagged)" : "") << " build " << expect
+					<< " (refusing to load)" << sync_endl;
+				return Tools::ResultCode::FileMismatch;
+			}
 		}
 
 		result = Detail::ReadParameters<FeatureTransformer>(stream, tmp->feature_transformer);

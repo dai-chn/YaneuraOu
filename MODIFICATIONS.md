@@ -186,7 +186,11 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   L1 のスケールを `NNUE_L1_SCALE_BITS` (既定 6) で切替可能に (`-DNNUE_L1_SCALE_BITS=7` = QB 128)。
 - 背景: L1 (1024→16) の int8 QB=64 量子化で重みの 3〜4 割が 0 に丸められ、fp32 比 −66cp/std 70 の
   ズレが出ていた (report/51 §7.7.1)。QB=128 で残差 p50 74→20cp。
-- ★ネットワークハッシュはスケールビットに依存しないため、q64/q128 のファイル取り違えは検出されない。
+- ★ネットワークハッシュはスケールビットに依存しないため、q64/q128/int16 のファイル取り違えはハッシュでは検出されない。
+  そのため `evaluate_nnue.cpp` に `QuantTag()` を追加 (2026-08-28): nn.bin の description 末尾の
+  `;L1QB=<qb>/<i8|i16>` をビルドの `NNUE_L1_SCALE_BITS` / `NNUE_SFNN_L1_SCALE_BITS` / `NNUE_L1_INT16` と照合し、
+  不一致なら FileMismatch で読み込みを拒否する。タグ無しファイルは従来量子化 (QB64/int8) とみなす
+  (従来ビルドでは従来ファイルがそのまま読める)。タグの付与は shogi-nnue 側 `tools/nnue_tag.py`。
 - SFNN 経路も層別化 (2026-08-27): `layers/clipped_relu_explicit.h` / `layers/sqr_clipped_relu.h` に
   `WeightScaleBits` テンプレート引数 (SqrClippedReLU の SIMD 後シフトは 2*bits-9 に一般化)。
   `architectures/nnue_arch_gen.py` と生成済み SFNN ヘッダ (halfka2/halfka2t) で fc_0 の活性を
