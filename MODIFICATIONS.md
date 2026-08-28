@@ -191,3 +191,5 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `WeightScaleBits` テンプレート引数 (SqrClippedReLU の SIMD 後シフトは 2*bits-9 に一般化)。
   `architectures/nnue_arch_gen.py` と生成済み SFNN ヘッダ (halfka2/halfka2t) で fc_0 の活性を
   `NNUE_SFNN_L1_SCALE_BITS` (既定 6) で切替、fc_0 の shortcut 出力は `>> (bits-6)` でスケール差を吸収。
+- `layers/affine_transform_sparse_input_i16.h` (新規, 2026-08-28, task#68): L1 の int16 重み版疎入力 affine。
+  classic 3 ヘッダで `-DNNUE_L1_INT16` により選択 (WeightScaleBits ≤ 8)。ハッシュは int8 版と同一。

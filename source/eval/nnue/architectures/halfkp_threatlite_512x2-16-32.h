@@ -10,6 +10,7 @@
 #include "../layers/input_slice.h"
 #include "../layers/affine_transform.h"
 #include "../layers/affine_transform_sparse_input.h"
+#include "../layers/affine_transform_sparse_input_i16.h"
 #include "../layers/clipped_relu.h"
 
 namespace YaneuraOu {
@@ -37,7 +38,12 @@ namespace Layers {
 
 // ネットワーク構造の定義 (halfkp_512x2-16-32 と同一)
 using InputLayer = InputSlice<kTransformedFeatureDimensions * 2>;
+#if defined(NNUE_L1_INT16)
+// L1 を int16 重みで持つ (task#68)。-DNNUE_L1_INT16 -DNNUE_L1_SCALE_BITS=8 (QB=256) で使う
+using HiddenLayer1 = ClippedReLU<AffineTransformSparseInputI16<InputLayer, 16, NNUE_L1_SCALE_BITS>>;
+#else
 using HiddenLayer1 = ClippedReLU<AffineTransformSparseInput<InputLayer, 16, NNUE_L1_SCALE_BITS>>;
+#endif
 using HiddenLayer2 = ClippedReLU<AffineTransform<HiddenLayer1, 32>>;
 using OutputLayer = AffineTransform<HiddenLayer2, 1>;
 
