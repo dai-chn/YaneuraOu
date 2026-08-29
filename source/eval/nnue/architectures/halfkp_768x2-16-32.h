@@ -17,6 +17,7 @@
 #include "../layers/input_slice.h"
 #include "../layers/affine_transform.h"
 #include "../layers/affine_transform_sparse_input.h"
+#include "../layers/affine_transform_sparse_input_i16.h"
 #include "../layers/clipped_relu.h"
 
 namespace YaneuraOu {
@@ -31,12 +32,21 @@ using RawFeatures = Features::FeatureSet<
 // 変換後の入力特徴量の次元数
 constexpr IndexType kTransformedFeatureDimensions = 768;
 
+// L1 の重みスケールビット (6=QB64 従来 / 7=QB128, report/51 §7.7)。-DNNUE_L1_SCALE_BITS=7 で切替
+#ifndef NNUE_L1_SCALE_BITS
+#define NNUE_L1_SCALE_BITS 6
+#endif
+
 namespace Layers {
 
 // Define network structure
 // ネットワーク構造の定義 (512x2-16-32 と L1/L2 は同一、FT 幅だけ 512→768)
 using InputLayer = InputSlice<kTransformedFeatureDimensions * 2>;
-using HiddenLayer1 = ClippedReLU<AffineTransformSparseInput<InputLayer, 16>>;
+#if defined(NNUE_L1_INT16)
+using HiddenLayer1 = ClippedReLU<AffineTransformSparseInputI16<InputLayer, 16, NNUE_L1_SCALE_BITS>>;
+#else
+using HiddenLayer1 = ClippedReLU<AffineTransformSparseInput<InputLayer, 16, NNUE_L1_SCALE_BITS>>;
+#endif
 using HiddenLayer2 = ClippedReLU<AffineTransform<HiddenLayer1, 32>>;
 using OutputLayer = AffineTransform<HiddenLayer2, 1>;
 
