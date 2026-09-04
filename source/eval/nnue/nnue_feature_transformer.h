@@ -276,15 +276,28 @@ class FeatureTransformer {
 		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
 			weights_[i] = read_little_endian<WeightType>(stream);
 #endif
+#if defined(THREAT_ATTACKER_MAJOR)
+		// threat 行を attacker-major へロード時置換 (task#59 / report/51 §7.6.2)。
+		// RawFeatures = FeatureSet<Threat, HalfKP> なので threat の先頭行 = HalfKP::kDimensions。
+		if (!stream.fail())
+			Features::Threat::PermuteRows(weights_, kHalfDimensions,
+			                              Features::HalfKP<Features::Side::kFriend>::kDimensions);
+#endif
 		return !stream.fail() ? Tools::ResultCode::Ok : Tools::ResultCode::FileReadError;
 	}
 
 	// Write network parameters
 	// パラメータを書き込む
 	bool WriteParameters(std::ostream& stream) const {
+#if defined(THREAT_ATTACKER_MAJOR)
+		// 並び替え済み配置の保存は未対応 (標準 pair-major へ逆置換していないため、
+		// このまま書くと他ビルドで読めない nn.bin ができる)。学習系はこのビルドで使わないこと。
+		return false;
+#else
 		stream.write(reinterpret_cast<const char*>(biases_), kHalfDimensions * sizeof(BiasType));
 		stream.write(reinterpret_cast<const char*>(weights_), kHalfDimensions * kInputDimensions * sizeof(WeightType));
 		return !stream.fail();
+#endif
 	}
 
 	// Proceed with the difference calculation if possible
@@ -683,6 +696,23 @@ class FeatureTransformer {
 				// ★reset は王移動。added が全 active になるので「全再構築」に数える
 				if (reset[pc]) { g_ft_stat.n_reset++; g_ft_stat.rows_full += rows; }
 				else           { g_ft_stat.rows_inc += rows; }
+			}
+#endif
+#if defined(FT_ROW_PREFETCH)
+			// 差分行の先出しプリフェッチ (task#59): index は確定済みなので、accumulate に入る前に
+			// 全行 (両視点) のフェッチを重ねて発行する。行 = kHalfDimensions×2B、先頭と中間の
+			// 2 ライン → 残りは HW ストリームプリフェッチに任せる。意味論は不変。
+			for (Color pf_p : {BLACK, WHITE}) {
+				for (const auto index : removed_indices[pf_p]) {
+					const auto* row = reinterpret_cast<const char*>(&weights_[kHalfDimensions * index]);
+					_mm_prefetch(row, _MM_HINT_T0);
+					_mm_prefetch(row + kHalfDimensions, _MM_HINT_T0);   // 行の中間 (bytes = dims*2/2)
+				}
+				for (const auto index : added_indices[pf_p]) {
+					const auto* row = reinterpret_cast<const char*>(&weights_[kHalfDimensions * index]);
+					_mm_prefetch(row, _MM_HINT_T0);
+					_mm_prefetch(row + kHalfDimensions, _MM_HINT_T0);
+				}
 			}
 #endif
 			for (Color perspective : {BLACK, WHITE}) {

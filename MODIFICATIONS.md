@@ -197,3 +197,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `NNUE_SFNN_L1_SCALE_BITS` (既定 6) で切替、fc_0 の shortcut 出力は `>> (bits-6)` でスケール差を吸収。
 - `layers/affine_transform_sparse_input_i16.h` (新規, 2026-08-28, task#68): L1 の int16 重み版疎入力 affine。
   classic 3 ヘッダで `-DNNUE_L1_INT16` により選択 (WeightScaleBits ≤ 8)。ハッシュは int8 版と同一。
+
+## threat FT 行の attacker-major 並び替え + 行 prefetch (2026-09-05, task#59)
+
+- `source/eval/nnue/features/threat.h/.cpp`: `-DTHREAT_ATTACKER_MAJOR` で threat index を
+  (as, ac) ブロック内 (from, ord) スラブ × 18 (ds, dc) の attacker-major 配置に変更。
+  nn.bin は標準 (pair-major) のまま、FT ロード時に `Threat::PermuteRows` が行を置換
+  (全単射検算付き)。置換済み配置の WriteParameters は封鎖 (他ビルドで読めないファイル防止)。
+  検証: 同一 nn.bin で標準ビルドと eval 80 局面ビット一致。NPS は ×1.0038 n.s. = 採用見送り
+  (局所性仮説の棄却データとして保存)。
+- `source/eval/nnue/nnue_feature_transformer.h`: `-DFT_ROW_PREFETCH` で update_accumulator の
+  差分行 (removed/added、両視点) の先頭+中間ラインを accumulate 前に一括プリフェッチ。
+  意味論不変。

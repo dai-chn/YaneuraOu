@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace YaneuraOu {
 namespace Eval::NNUE::Features {
@@ -137,6 +139,8 @@ struct Tables {
     uint32_t threat_dims = 0;
     // クラスごとの片色空盤利き総数 (pair_base の構築に使う)
     std::array<uint32_t, kNumClasses> attacks_per_color{};
+    // クラス累積 (attacker-major 配置の base 計算用)。class_cum[9] = 片側総数 6,020
+    std::array<uint32_t, kNumClasses + 1> class_cum{};
 
     Tables() {
         // attack_order は「攻撃しない組 = 0xFF」を先に敷いてから構築する
@@ -164,6 +168,10 @@ struct Tables {
                 (void)w;
             }
         }
+
+        class_cum[0] = 0;
+        for (int tc = 0; tc < kNumClasses; ++tc)
+            class_cum[tc + 1] = class_cum[tc] + attacks_per_color[tc];
 
         // pair_base (bullet build_pair_base と同一の走査順: as -> ac -> ds -> dc)
         uint32_t cum = 0;
@@ -218,10 +226,58 @@ inline uint32_t pair_index(const Tables& T, Color perspective,
     const int pat = attack_pattern_id(ac, oriented);
     const uint8_t ord = T.attack_order[pat][from_n][to_n];
     ASSERT_LV3(ord != 0xFF);
+#if defined(THREAT_ATTACKER_MAJOR)
+    // attacker-major 配置 (task#59): (as, ac) ブロック内を (from, ord) スラブ × 18 (ds, dc) で並べる。
+    // 同一攻撃駒 (ac, from) が触る行が 1 本の連続スラブに収まり、部分木内の再訪でホットに保たれる
+    // (pair-major は同じ攻撃駒の行が 18 ブロックへ散る — report/51 §7.6.1)。
+    // ★訓練時 (pair-major) と異なる index。nn.bin は PermuteRows がロード時に並び替える。
+    return (T.class_cum[kNumClasses] * uint32_t(as) + T.class_cum[ac]
+            + T.from_offset[pat][from_n] + ord) * 18u + uint32_t(ds * 9 + dc);
+#else
     return T.pair_base[as * 162 + ac * 18 + ds * 9 + dc] + T.from_offset[pat][from_n] + ord;
+#endif
 }
 
 }  // namespace
+
+#if defined(THREAT_ATTACKER_MAJOR)
+// 標準 (pair-major) 配置で学習された nn.bin の threat 行を attacker-major へロード時置換する。
+// 純粋な行の relabel なので eval はビット一致のまま (検証はビルド後の eval 照合で行う)。
+void Threat::PermuteRows(std::int16_t* weights, std::size_t half_dims, std::size_t row_offset) {
+    const Tables& T = tables();
+    const uint32_t total = T.class_cum[kNumClasses];
+    std::vector<uint32_t> perm(kDimensions);   // old (pair-major) -> new (attacker-major)
+    for (int as = 0; as < 2; ++as)
+        for (int ac = 0; ac < kNumClasses; ++ac)
+            for (int ds = 0; ds < 2; ++ds)
+                for (int dc = 0; dc < kNumClasses; ++dc) {
+                    const uint32_t ob = T.pair_base[as * 162 + ac * 18 + ds * 9 + dc];
+                    const uint32_t nb = (total * uint32_t(as) + T.class_cum[ac]) * 18u
+                                      + uint32_t(ds * 9 + dc);
+                    const uint32_t n = T.attacks_per_color[ac];
+                    for (uint32_t off = 0; off < n; ++off)
+                        perm[ob + off] = nb + off * 18u;
+                }
+    // 全単射の検算 (置換もれ/重複は静かな評価破壊になるので即死させる)
+    {
+        std::vector<uint8_t> seen(kDimensions, 0);
+        for (uint32_t i = 0; i < kDimensions; ++i) {
+            if (perm[i] >= kDimensions || seen[perm[i]]) {
+                std::fprintf(stderr, "FATAL: THREAT_ATTACKER_MAJOR permutation is not a bijection\n");
+                std::exit(1);
+            }
+            seen[perm[i]] = 1;
+        }
+    }
+    // 行の置換 (一時バッファ ~212MB、ロード時 1 回だけ)
+    std::vector<std::int16_t> tmp(std::size_t(kDimensions) * half_dims);
+    std::int16_t* rows = weights + row_offset * half_dims;
+    for (uint32_t i = 0; i < kDimensions; ++i)
+        std::memcpy(&tmp[std::size_t(perm[i]) * half_dims], rows + std::size_t(i) * half_dims,
+                    half_dims * sizeof(std::int16_t));
+    std::memcpy(rows, tmp.data(), tmp.size() * sizeof(std::int16_t));
+}
+#endif  // defined(THREAT_ATTACKER_MAJOR)
 
 #if defined(THREAT_DIFF_STATS)
 // 診断用カウンタ (研究ビルド限定)。atexit で stderr に出す。

@@ -61,6 +61,14 @@ class Threat {
   // kAnyPieceMoved は常に reset (= AppendActiveIndices 側) になるので呼ばれない
   static void AppendChangedIndices(const Position& pos, Color perspective,
                                    IndexList* removed, IndexList* added);
+
+#if defined(THREAT_ATTACKER_MAJOR)
+  // attacker-major 並び替え (task#59 / report/51 §7.6.2)。
+  // index は (as, ac) ブロック内 (from, ord) スラブ × 18 (ds, dc) の attacker-major 配置になる。
+  // nn.bin は標準 (pair-major) 配置で学習されているので、FT ロード時に本関数で行を置換する。
+  // weights: FT 重み配列 (行 = half_dims 要素)、row_offset: 合成特徴量内の threat 先頭行。
+  static void PermuteRows(std::int16_t* weights, std::size_t half_dims, std::size_t row_offset);
+#endif
 };
 
 } // namespace Eval::NNUE::Features
