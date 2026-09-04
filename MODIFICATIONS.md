@@ -31,11 +31,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `ENABLE_SEARCH_TUNE` 定義時のみ USI オプションとして露出し、Stockfish の `TUNE()` 機構で
   SPSA から駆動できる。`Tune::init(options)` は上流に既に在るものをそのまま使う。
 
-### 2. NNUE アーキテクチャ `halfkp_512x2-16-32` の追加
+### 2. NNUE アーキテクチャ `halfkp_768x2-16-32` の追加
 
-配布版の評価関数 (`eval/nn.bin`) が使うアーキテクチャ。
-`source/eval/nnue/architectures/halfkp_512x2-16-32.h` (新規) と
+配布版 (v1、2026-08-30 更新) の評価関数 (`eval/nn.bin`) が使うアーキテクチャ。
+`source/eval/nnue/architectures/halfkp_768x2-16-32.h` (新規) と
 `source/eval/nnue/nnue_architecture.h` / `source/Makefile` の分岐。
+配布ビルドは L1 を int8 QB=128 で量子化した net を使うため
+`EXTRA_CPPFLAGS=-DNNUE_L1_SCALE_BITS=7` を付けてビルドする
+(net 側 description の `;L1QB=128/i8` タグと照合し、不一致は起動時に拒否)。
+旧配布版 (2026-08-15 公開〜2026-08-30) は `halfkp_512x2-16-32.h` (q64、シフト 6) を使用。
 
 ## 配布・移植性
 
@@ -62,7 +66,8 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 | `halfkp_512x2-8-64.h` | Suisho10 と同一アーキ (比較用) |
 | `halfkp_512x2-32-32.h` | L2 幅の検証 |
 | `halfkp_512x2-16-32-screlu.h` | FT 活性化を SCReLU 化 |
-| `halfkp_768x2-8-32.h` / `halfkp_768x2-16-32.h` | FT 幅 768 の検証 |
+| `halfkp_512x2-16-32.h` | 旧配布アーキ (2026-08-30 の v1 更新まで) |
+| `halfkp_768x2-8-32.h` | FT 幅 768 の検証 |
 | `halfkp_768x2-16-64.h` | AobaNNUE 1.1 と同一アーキ (比較用) |
 | `halfkp_1024x2-8-32.h` / `halfkp_1024x2-8-64.h` | FT 幅 1024 |
 | `halfka_512x2-16-32.h` | HalfKA 入力 |
