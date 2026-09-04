@@ -209,3 +209,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `source/eval/nnue/nnue_feature_transformer.h`: `-DFT_ROW_PREFETCH` で update_accumulator の
   差分行 (removed/added、両視点) の先頭+中間ラインを accumulate 前に一括プリフェッチ。
   意味論不変。
+
+## ThreatLite の差分更新 (2026-09-05, task#59 ②)
+
+- `source/eval/nnue/features/threat_diff.h` (新規): Threat の駒レベル差分 (対の増減) を
+  共有型 ThreatPiecePair/ThreatPieceDiff + `threat_piece_diff(pos)` として公開。
+- `source/eval/nnue/features/threat.cpp`: 上記へのリファクタ (挙動不変、キャッシュは従来どおり)。
+- `source/eval/nnue/features/threat_lite.h/.cpp`: kRefreshTrigger を kNone (差分) に変更し、
+  AppendChangedIndices を threat_piece_diff の lite index 写像で実装。count 意味論なので
+  参照カウント不要 (対の ±1 = 行の ±1 加算)。KEEP_LAST_MOVE 無し / -DTHREAT_NAIVE_REBUILD は naive に落ちる。
+- `source/config.h`: THREATLITE エディションでも KEEP_LAST_MOVE を定義。
+- 検証: 探索一致 20 局面 × 200k ノード (bestmove/score/nodes/pv 一致)。
+  NPS: vs naive x1.4863 / vs full(diff) x1.0681 (訓練同居 busy 0.3、idle 再測は後続)。

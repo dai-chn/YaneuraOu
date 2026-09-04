@@ -9,9 +9,10 @@
 //   重複して push する (特徴値 = 攻撃駒数)。accumulator の行加算が重複分
 //   積まれることで自然に count になる。bullet 側の sparse gather と同一。
 //
-// ★当面はナイーブ全再構築 (kAnyPieceMoved)。差分更新 (純加減算で参照カウント
-//   不要になる設計 — report/51 §7.5) は Elo 保持率 A/B が通ってから実装する。
-//   判定対局は固定ノードなので NPS は結果に影響しない。
+// ★差分更新 (task#59 ②): Threat (full) の駒レベル差分 (threat_piece_diff) を
+//   lite index に写像する。count 意味論なので対の ±1 = index の ±1 push がそのまま
+//   正しく、参照カウントは不要 (report/51 §7.5 の設計どおり)。
+//   KEEP_LAST_MOVE の無いビルドと -DTHREAT_NAIVE_REBUILD は全再構築に落ちる。
 
 #ifndef CLASSIC_NNUE_FEATURES_THREAT_LITE_H
 #define CLASSIC_NNUE_FEATURES_THREAT_LITE_H
@@ -47,14 +48,18 @@ class ThreatLite {
   // 同時にアクティブになりうる最大特徴数 (重複 emit 込み。full threat と同じ上限)
   static constexpr IndexType kMaxActiveDimensions = 320;
 
-  // ナイーブ全再構築 (毎手 reset)。差分化は A/B 通過後 (ヘッダ冒頭コメント参照)。
+  // 差分更新 (task#59 ②)。threat.h と同じ条件でナイーブ全再構築へフォールバック
+#if defined(THREAT_NAIVE_REBUILD) || !defined(KEEP_LAST_MOVE)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+#else
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
+#endif
 
   // 特徴量のインデックスのリストを取得する (★重複 push あり = count 意味論)
   static void AppendActiveIndices(const Position& pos, Color perspective,
                                   IndexList* active);
 
-  // kAnyPieceMoved は常に reset になるので呼ばれない
+  // 差分更新: threat_piece_diff (駒レベル) を lite index へ写像する
   static void AppendChangedIndices(const Position& pos, Color perspective,
                                    IndexList* removed, IndexList* added);
 };

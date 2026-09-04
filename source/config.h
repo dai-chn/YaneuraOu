@@ -693,7 +693,9 @@ constexpr bool pretty_jp = false;
 
 // halfkp+threat (task#37): threat 特徴の差分更新 (AppendChangedIndices) が
 // 直前の指し手を必要とする。FOR_TOURNAMENT の #undef より後で再定義する。
-#if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32)
+// threatlite も同じ駒レベル差分 (threat_piece_diff) を使う (task#59 ②)。
+#if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32) \
+	|| defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32)
 	#define KEEP_LAST_MOVE
 #endif
 

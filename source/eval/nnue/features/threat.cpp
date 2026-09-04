@@ -12,6 +12,7 @@
 #if defined(EVAL_NNUE)
 
 #include "threat.h"
+#include "threat_diff.h"
 #include "index_list.h"
 #include "../../../position.h"
 #include "../../../bitboard.h"
@@ -350,38 +351,22 @@ void Threat::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
 // 他の駒は現在の盤面 (pos.piece_on) をそのまま使い、from/to のみ読み替える。
 #if defined(KEEP_LAST_MOVE)
 
-// 駒レベルの対 (視点非依存)。index への写像は視点ごとに行う。
-struct ThreatPair {
-    uint8_t attacker_pc;   // Piece
-    uint8_t attacker_sq;
-    uint8_t victim_pc;     // Piece
-    uint8_t victim_sq;
-};
-
-// 視点間キャッシュ: BLACK 呼び出しで駒レベル差分を計算し、直後の WHITE 呼び出しで再利用。
-// StateInfo のアドレスは使い回されるので (key, lastMove) も照合する。
-struct ThreatDiffCache {
-    const void* st = nullptr;
-    uint64_t key = 0;
-    uint32_t move = 0;
-    int n_removed = 0, n_added = 0;
-    ThreatPair removed[128];
-    ThreatPair added[128];
-};
+// 駒レベルの対と視点間キャッシュの型は threat_diff.h の共有型を使う
+// (ThreatLite も同じ駒レベル差分を流用する — task#59 ②)。
+using ThreatPair = ThreatPiecePair;
+using ThreatDiffCache = ThreatPieceDiff;
 static thread_local ThreatDiffCache t_diff_cache;
 
 static void collect_piece_diff(const Position& pos, ThreatDiffCache& C);
 
-void Threat::AppendChangedIndices(const Position& pos, Color perspective,
-                                  IndexList* removed, IndexList* added) {
-    THREAT_STAT(g_changed_calls.fetch_add(1, std::memory_order_relaxed);)
-    const Tables& T = tables();
+// 直前手による駒レベル threat 差分 (視点非依存)。BLACK 呼び出しで計算し、
+// 直後の WHITE 呼び出しはキャッシュヒットで再利用。StateInfo のアドレスは
+// 使い回されるので (key, lastMove) も照合する。
+const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
     const StateInfo* st = pos.state();
     const Move m = st->lastMove;
     // dirty_num == 0 (null move) は feature_set 側で弾かれるのでここには来ない
     ASSERT_LV3(m.to_u32() != 0);
-
-    // ---- 視点間キャッシュの照合 (COLOR 順で BLACK が先に呼ばれる) ----
     ThreatDiffCache& C = t_diff_cache;
     const bool cache_hit = (C.st == (const void*)st && C.key == (uint64_t)st->key()
                             && C.move == m.to_u32());
@@ -392,6 +377,14 @@ void Threat::AppendChangedIndices(const Position& pos, Color perspective,
         C.n_removed = C.n_added = 0;
         collect_piece_diff(pos, C);
     }
+    return C;
+}
+
+void Threat::AppendChangedIndices(const Position& pos, Color perspective,
+                                  IndexList* removed, IndexList* added) {
+    THREAT_STAT(g_changed_calls.fetch_add(1, std::memory_order_relaxed);)
+    const Tables& T = tables();
+    const ThreatPieceDiff& C = threat_piece_diff(pos);
     // ---- 駒レベル差分 -> この視点の index ----
     for (int i = 0; i < C.n_removed; ++i) {
         const ThreatPair& pr = C.removed[i];
