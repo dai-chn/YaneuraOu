@@ -483,6 +483,8 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_THREAT_512X2_16_32
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_THREATLITE_512X2_16_32
+		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_THREATDROP2_512X2_16_32)
+			CPPFLAGS += -DEVAL_NNUE_HALFKP_THREATDROP2_512X2_16_32
 
 		else ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
 			CPPFLAGS += -DEVAL_NNUE_HALFKP_512X2_32_32
@@ -545,6 +547,7 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 		eval/nnue/features/pe9.cpp                                      \
 		eval/nnue/features/threat.cpp                                   \
 		eval/nnue/features/threat_lite.cpp                              \
+		eval/nnue/features/threat_drop2.cpp                             \
 		engine/yaneuraou-engine/yaneuraou-search.cpp
 
 	ifneq (,$(findstring em++,$(COMPILER)))

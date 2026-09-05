@@ -226,3 +226,12 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `source/config.h`: THREATLITE エディションでも KEEP_LAST_MOVE を定義。
 - 検証: 探索一致 20 局面 × 200k ノード (bestmove/score/nodes/pv 一致)。
   NPS: vs naive x1.4863 / vs full(diff) x1.0681 (訓練同居 busy 0.3、idle 再測は後続)。
+
+## ThreatDrop2 特徴 (2026-09-05, task#73)
+
+- `source/eval/nnue/features/threat_drop2.h/.cpp` (新規): ThreatLite から攻撃駒種も落とした
+  (attacker_side, defender_side, defender_class, to) 2,916 次元の特徴。count 意味論、ナイーブ全再構築
+  (Elo 保持率 A/B 用)。`-DTHREAT_DROP2_DUMP` で active index を stderr に出す (bullet 側との照合用)。
+- `source/eval/nnue/architectures/halfkp_threat_drop2_512x2-16-32.h` (新規)、`nnue_architecture.h`、`Makefile`:
+  エディション YANEURAOU_ENGINE_NNUE_HALFKP_THREATDROP2_512X2_16_32 を追加。
+- 検証: index 多重集合が bullet-shogi と 64 局面一致、整数忠実 numpy forward と eval がビット一致。
