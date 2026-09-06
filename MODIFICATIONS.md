@@ -235,3 +235,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `source/eval/nnue/architectures/halfkp_threat_drop2_512x2-16-32.h` (新規)、`nnue_architecture.h`、`Makefile`:
   エディション YANEURAOU_ENGINE_NNUE_HALFKP_THREATDROP2_512X2_16_32 を追加。
 - 検証: index 多重集合が bullet-shogi と 64 局面一致、整数忠実 numpy forward と eval がビット一致。
+
+## ThreatEffect 特徴 (2026-09-06, task#73 v2)
+
+- `source/eval/nnue/features/threat_effect.h/.cpp` (新規): (attacker_side, defender_side, defender_class, to,
+  長い利き 0/1/2+, 短い利き 0/1/2+) 26,244 次元。攻撃側は玉を含み、長い利き = 香/角/飛の射程 + 馬斜め + 龍縦横
+  (LONG_EFFECT_LIBRARY の board_effect / long_effect と同定義 → 将来は列挙なしで差分計算可)。
+  判定用はナイーブ全再構築。`-DTHREAT_EFFECT_DUMP` で index を stderr へ。
+- `source/eval/nnue/architectures/halfkp_threat_effect_512x2-16-32.h` (新規)、`nnue_architecture.h`、`Makefile`:
+  エディション YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_512X2_16_32。
+- 検証: bullet-shogi `ShogiHalfKPThreatEffect` と index 多重集合が 64 局面 × 両視点で一致。
