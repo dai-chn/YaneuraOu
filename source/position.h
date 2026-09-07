@@ -214,6 +214,14 @@ struct StateInfo {
 	PieceType lastMovedPieceType;
 #endif
 
+#if defined(THREAT_EFFECT_DIFF)
+	// ThreatEffect 特徴の差分更新用 (task#73 v2): この局面に至る do_move() の直前
+	// (= previous 局面) の利き盤のコピー。Position 側の board_effect_prev (HalfKPE9 用) と違い
+	// StateInfo に持つので、undo_move / null move の順序に依存せず「1 手前」が常に正しい。
+	LongEffect::ByteBoard te_board_effect_prev[COLOR_NB];
+	LongEffect::WordBoard te_long_effect_prev;
+#endif
+
 #endif
 };
 

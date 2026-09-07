@@ -245,3 +245,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `source/eval/nnue/architectures/halfkp_threat_effect_512x2-16-32.h` (新規)、`nnue_architecture.h`、`Makefile`:
   エディション YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_512X2_16_32。
 - 検証: bullet-shogi `ShogiHalfKPThreatEffect` と index 多重集合が 64 局面 × 両視点で一致。
+
+## ThreatEffect の利き盤ベース差分更新 (2026-09-07, task#73 v2)
+
+- `source/eval/nnue/features/threat_effect.h/.cpp`: 既定を `THREAT_EFFECT_DIFF` に変更。
+  バケットを LONG_EFFECT_LIBRARY の `board_effect` (利き数) と `long_effect` (長い利き方向の popcount)
+  から**列挙なし**で引き、差分更新は直前局面の利き盤との比較 (動いた駒/取られた駒 + 利き状態が変わった升の駒)。
+  kRefreshTrigger は kNone (玉移動でも reset しない)。`-DTHREAT_NAIVE_REBUILD` で従来のナイーブ実装。
+- `source/position.h`: StateInfo に `te_board_effect_prev[2]` / `te_long_effect_prev` を追加 (THREAT_EFFECT_DIFF 時)。
+  `source/position.cpp` do_move(): 利き更新前の盤を新 StateInfo へ退避 (HalfKPE9 の Position 側 board_effect_prev と
+  違い StateInfo に持つので undo/null move の順序に依存しない)。
+- `source/config.h`: THREATEFFECT エディションで KEEP_LAST_MOVE / LONG_EFFECT_LIBRARY / THREAT_EFFECT_DIFF を定義。
+  (LONG_EFFECT_LIBRARY により 1 手詰めルーチンが利き版に切り替わる。)

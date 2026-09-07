@@ -1741,6 +1741,12 @@ void Position::do_move_impl(Move m, StateInfo& newSt, bool givesCheck, const T* 
     std::memcpy(board_effect_prev, board_effect, sizeof(board_effect));
 #endif
 
+#if defined(THREAT_EFFECT_DIFF)
+    // ThreatEffect の差分更新用 (task#73 v2): 利きを更新する前の盤を新しい StateInfo に退避
+    std::memcpy(st->te_board_effect_prev, board_effect, sizeof(board_effect));
+    std::memcpy(&st->te_long_effect_prev, &long_effect, sizeof(long_effect));
+#endif
+
     // 直前の指し手を保存するならばここで行なう。
 
 #if defined(KEEP_LAST_MOVE)

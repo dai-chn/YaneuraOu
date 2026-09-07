@@ -9,8 +9,12 @@
 //   - 攻撃側は玉を含む。被弾側は玉を除外 (threat 系と同じ)。
 //   - 長い利き = 香/角/飛の射程 + 馬の斜め射程 + 龍の縦横射程 (隣接升も含む)。
 //     短い利き = 歩/桂/銀/金類/玉の 1 歩 + 馬の縦横 1 歩 + 龍の斜め 1 歩。
-//   → 将来 board_effect (利き数) と long_effect (方向 popcount) から列挙なしで計算できる。
-// ★本ファイルは Elo 保持率 A/B 用の判定実装: 列挙で利き数を数え、ナイーブ全再構築 (kAnyPieceMoved)。
+//
+// 実装は 2 系統 (threat_effect.cpp):
+//   - THREAT_EFFECT_DIFF (既定、config.h で edition から定義): board_effect (利き数) と long_effect
+//     (長い利き方向の popcount) から**列挙なし**でバケットを引き、do_move() で StateInfo に退避した
+//     直前局面の利き盤との比較で差分更新する (kNone = 玉移動でも reset しない)。
+//   - THREAT_NAIVE_REBUILD: 判定用ナイーブ実装 (利きを列挙して数え、毎手 reset)。
 //
 // 意味論: 被弾駒 1 つ × 攻撃側 2 色 = 常に 2 特徴 (利き 0 本の (0,0) 状態も emit)。重複 emit なし。
 
@@ -48,14 +52,19 @@ class ThreatEffect {
   // 同時にアクティブになりうる最大特徴数 (玉以外の駒 ≤ 38 × 攻撃側 2 色)
   static constexpr IndexType kMaxActiveDimensions = 80;
 
-  // ナイーブ全再構築 (毎手 reset)。差分化 (board_effect 差分) は A/B 通過後
+#if defined(THREAT_EFFECT_DIFF)
+  // 差分更新: 玉が動いても reset しない (利き盤の差分だけで index の増減が決まる)
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
+#else
+  // ナイーブ全再構築 (毎手 reset)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+#endif
 
   // 特徴量のインデックスのリストを取得する
   static void AppendActiveIndices(const Position& pos, Color perspective,
                                   IndexList* active);
 
-  // kAnyPieceMoved は常に reset になるので呼ばれない
+  // 一手前から値が変化したインデックスのリストを取得する (THREAT_EFFECT_DIFF のみ実装)
   static void AppendChangedIndices(const Position& pos, Color perspective,
                                    IndexList* removed, IndexList* added);
 };
