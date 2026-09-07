@@ -80,6 +80,11 @@
 // halfkp+threat_effect_512x2-16-32型 (task#73 v2: 長/短利き数バケット 26,244 次元)
 #include "architectures/halfkp_threat_effect_512x2-16-32.h"
 
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_768X2_16_32)
+
+// halfkp+threat_effect_768x2-16-32型 (task#73 幅増加アーム)
+#include "architectures/halfkp_threat_effect_768x2-16-32.h"
+
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_512X2_32_32)
 
 // halfkp_512x2-32-32型 (L2=32: L2 がタダか検証用)
