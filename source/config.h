@@ -703,8 +703,11 @@ constexpr bool pretty_jp = false;
 // (board_effect / long_effect) から列挙なしで計算し、直前局面の利き盤との比較で差分更新する。
 // -DTHREAT_NAIVE_REBUILD を付けると判定用のナイーブ実装 (列挙 + 毎手 reset) に戻る
 // (LONG_EFFECT_LIBRARY は両者で有効 = 1 手詰めルーチンが同じなので探索一致の比較ができる)。
+// SFNN 版 (halfka2te、王者移植) も同じ差分機構を使う (edition 名にハイフンが入るので Makefile が
+// NNUE_SFNN_HALFKA2TE を定義する)。
 #if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_512X2_16_32) \
-	|| defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_768X2_16_32)
+	|| defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATEFFECT_768X2_16_32) \
+	|| defined(NNUE_SFNN_HALFKA2TE)
 	#define KEEP_LAST_MOVE
 	#define LONG_EFFECT_LIBRARY
 	#if !defined(THREAT_NAIVE_REBUILD)

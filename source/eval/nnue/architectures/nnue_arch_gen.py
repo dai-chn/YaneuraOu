@@ -205,6 +205,20 @@ elif input_feature == "halfka2t":
             Features::HalfKA2<Features::Side::kFriend>>;
     """
 
+elif input_feature == "halfka2te":
+
+    # HalfKA2 + ThreatEffect (task#73 王者移植)。レイアウト [KA2][ThreatEffect] = bullet 側と一致。
+    header += f"""
+    #include "../features/half_ka2.h"
+    #include "../features/threat_effect_ka2.h"
+    """
+
+    raw_features = f"""
+        using RawFeatures = Features::FeatureSet<
+            Features::ThreatEffectKa2,
+            Features::HalfKA2<Features::Side::kFriend>>;
+    """
+
 elif input_feature == "halfkahm2":
 
     header += f"""

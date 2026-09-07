@@ -530,6 +530,12 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 			ifneq (,$(findstring YANEURAOU_ENGINE_NNUE_SFNNwoPSQT,$(YANEURAOU_EDITION)))
 				CPPFLAGS += -DSFNNwoPSQT
 			endif
+			# halfka2te (HalfKA2+ThreatEffect、task#73): edition 名にハイフンが入るので config.h では
+			# 判定できない。ここで専用シンボルを定義し config.h が KEEP_LAST_MOVE / LONG_EFFECT_LIBRARY /
+			# THREAT_EFFECT_DIFF を有効にする。
+			ifneq (,$(findstring _halfka2te_,$(YANEURAOU_EDITION)))
+				CPPFLAGS += -DNNUE_SFNN_HALFKA2TE
+			endif
 		endif
 	endif
 

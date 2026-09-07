@@ -257,3 +257,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   違い StateInfo に持つので undo/null move の順序に依存しない)。
 - `source/config.h`: THREATEFFECT エディションで KEEP_LAST_MOVE / LONG_EFFECT_LIBRARY / THREAT_EFFECT_DIFF を定義。
   (LONG_EFFECT_LIBRARY により 1 手詰めルーチンが利き版に切り替わる。)
+
+## SFNN halfka2te (HalfKA2 + ThreatEffect) edition (2026-09-07, task#73 王者移植)
+
+- `source/eval/nnue/features/threat_effect_ka2.h` (新規): ThreatEffect の HalfKA2 ペア用バリアント (ハッシュのみ 0xB52093FA、
+  BulletOu 側 composite 0x0B660A8A から逆算)。
+- `source/eval/nnue/architectures/nnue_arch_gen.py`: 入力特徴 `halfka2te` を追加 (`FeatureSet<ThreatEffectKa2, HalfKA2>`)。
+  edition `YANEURAOU_ENGINE_NNUE_SFNNwoPSQT_halfka2te_1024-7-64-ls9` で生成されるヘッダも同梱。
+- `source/Makefile`: edition 名に `_halfka2te_` を含むとき `-DNNUE_SFNN_HALFKA2TE` を定義。
+  `source/config.h`: それを受けて KEEP_LAST_MOVE / LONG_EFFECT_LIBRARY / THREAT_EFFECT_DIFF を有効化
+  (SFNN でも利き盤ベースの差分更新を使う)。
