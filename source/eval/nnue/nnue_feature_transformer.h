@@ -70,6 +70,8 @@ struct FtStat {
     uint64_t n_reset     = 0;   // (b) 王移動で reset された perspective 数
     uint64_t rows_full   = 0;   // (a)+(b) で読んだ行数
     uint64_t rows_inc    = 0;   // 差分で読んだ行数
+    uint64_t rows_cache  = 0;   // (c) accumulator キャッシュ (ENABLE_ACC_CACHE) との集合差分で読んだ行数
+    uint64_t n_cache_hit = 0;   // (c) キャッシュが有効だった (全再構築を差分に置き換えた) 回数
 };
 // C++17 の inline 変数。計測用ビルドのみなので TU をまたぐ定義の手間を省く。
 // Threads=1 前提 (計測用ビルドのみ。並列では数え落とす)。
@@ -197,6 +199,30 @@ class FeatureTransformer {
 	using BiasType   = std::int16_t;
 	using WeightType = std::int16_t;
 
+#if defined(ENABLE_ACC_CACHE)
+	// ★accumulator キャッシュ ("Finny table"、task#50 / report/52 §18.13)
+	//   玉移動トリガ (kFriendKingMoved) の slot は玉が動くたびに全再構築 (HalfKP で ~39 行/視点) になる。
+	//   視点 × 自玉升ごとに「その時の accumulator と active index (ソート済)」を thread_local に覚えておき、
+	//   次に同じ玉升で全再構築が要るときはキャッシュとの集合差分 (removed/added の数行) で作る。
+	//   特徴集合の種類に依らず index 列だけで動くので HalfKP / HalfKA2 共通。整数加算の順序非依存性により
+	//   結果はビット一致 (探索一致で確認)。ネットを読み直したら generation で無効化する。
+	struct AccCacheEntry {
+		alignas(kCacheLineSize) BiasType accumulation[kHalfDimensions];
+		IndexType indices[RawFeatures::kMaxActiveDimensions];
+		std::uint16_t n = 0;
+		bool valid = false;
+	};
+	struct AccCache {
+		AccCacheEntry e[COLOR_NB][SQ_NB];   // [視点][その視点の自玉升]
+		std::uint32_t generation = 0;
+		void clear() { for (auto& row : e) for (auto& ent : row) ent.valid = false; }
+	};
+	static AccCache& acc_cache() {
+		static thread_local AccCache cache;
+		return cache;
+	}
+#endif
+
 	// Number of input/output dimensions
 	// 入出力の次元数
 	static constexpr IndexType kInputDimensions  = RawFeatures::kDimensions;
@@ -249,6 +275,9 @@ class FeatureTransformer {
 	// Read network parameters
 	// パラメータを読み込む
 	Tools::Result ReadParameters(std::istream& stream) {
+#if defined(ENABLE_ACC_CACHE)
+		++load_generation_;   // 重みが変わるので各スレッドの accumulator キャッシュを無効化する
+#endif
 #if defined(NNUE_FT_PAIRWISE)
 		// exp013 arm3 pairwise: trainer は SavedFormat::quantise::<i16> = raw little-endian を出力。
 		// SFNNwoPSQT の LEB128 形式とは異なるため、pairwise は標準 CReLU と同じ raw 読み出し。
@@ -640,9 +669,18 @@ class FeatureTransformer {
 			RawFeatures::AppendActiveIndices(pos, kRefreshTriggers[i], active_indices);
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 			if (i == 0) g_ft_stat.n_refresh++;
-			g_ft_stat.rows_full += active_indices[BLACK].size() + active_indices[WHITE].size();
 #endif
 			for (Color perspective : {BLACK, WHITE}) {
+#if defined(ENABLE_ACC_CACHE)
+				if (kRefreshTriggers[i] == Features::TriggerEvent::kFriendKingMoved) {
+					build_from_cache(perspective, pos.square<KING>(perspective), active_indices[perspective],
+					                 accumulator.accumulation[perspective][i], i == 0);
+					continue;
+				}
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+				g_ft_stat.rows_full += active_indices[perspective].size();
+#endif
 #if defined(VECTOR)
 				if (i == 0) {
 					std::memcpy(accumulator.accumulation[perspective][i], biases_, kHalfDimensions * sizeof(BiasType));
@@ -694,7 +732,14 @@ class FeatureTransformer {
 			for (Color pc : {BLACK, WHITE}) {
 				const uint64_t rows = removed_indices[pc].size() + added_indices[pc].size();
 				// ★reset は王移動。added が全 active になるので「全再構築」に数える
-				if (reset[pc]) { g_ft_stat.n_reset++; g_ft_stat.rows_full += rows; }
+				//   (ENABLE_ACC_CACHE で玉移動 slot がキャッシュ経由になるときは rows_cache 側で数える)
+				if (reset[pc]) {
+					g_ft_stat.n_reset++;
+#if defined(ENABLE_ACC_CACHE)
+					if (kRefreshTriggers[i] != Features::TriggerEvent::kFriendKingMoved)
+#endif
+					g_ft_stat.rows_full += rows;
+				}
 				else           { g_ft_stat.rows_inc += rows; }
 			}
 #endif
@@ -716,6 +761,14 @@ class FeatureTransformer {
 			}
 #endif
 			for (Color perspective : {BLACK, WHITE}) {
+#if defined(ENABLE_ACC_CACHE)
+				// 玉移動 slot の reset = 全 active (added_indices に入っている) をキャッシュとの集合差分で作る
+				if (reset[perspective] && kRefreshTriggers[i] == Features::TriggerEvent::kFriendKingMoved) {
+					build_from_cache(perspective, pos.square<KING>(perspective), added_indices[perspective],
+					                 accumulator.accumulation[perspective][i], i == 0);
+					continue;
+				}
+#endif
 #if defined(VECTOR)
 				constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
 				auto accumulation              = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
@@ -770,6 +823,81 @@ class FeatureTransformer {
 		// Stockfishでは fc27d15(2020-09-07) にcomputed_scoreが排除されているので確認
 		accumulator.computed_score = false;
 	}
+
+#if defined(ENABLE_ACC_CACHE)
+	// 1 行の加算/減算 (キャッシュ差分用)
+	inline void add_row(BiasType* acc, IndexType index) const {
+		const IndexType offset = kHalfDimensions * index;
+#if defined(VECTOR)
+		constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
+		auto a = reinterpret_cast<vec_t*>(acc);
+		auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_add_16(a[j], column[j]);
+#else
+		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] += weights_[offset + j];
+#endif
+	}
+	inline void sub_row(BiasType* acc, IndexType index) const {
+		const IndexType offset = kHalfDimensions * index;
+#if defined(VECTOR)
+		constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
+		auto a = reinterpret_cast<vec_t*>(acc);
+		auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_sub_16(a[j], column[j]);
+#else
+		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] -= weights_[offset + j];
+#endif
+	}
+
+	// active (未ソート、この視点の玉移動 slot の全 active index) から out を作る。
+	// キャッシュ [perspective][ksq] が有効ならその accumulator との集合差分、無効なら通常の全加算。
+	// 作った結果と active をキャッシュに書き戻す。with_bias = slot 0 (バイアスを含む) かどうか。
+	void build_from_cache(Color perspective, Square ksq, Features::IndexList& active, BiasType* out,
+	                      bool with_bias) const {
+		AccCache& C = acc_cache();
+		if (C.generation != load_generation_) {
+			C.clear();
+			C.generation = load_generation_;
+		}
+		AccCacheEntry& ent = C.e[perspective][ksq];
+		std::sort(active.begin(), active.end());
+		if (!ent.valid) {
+			if (with_bias)
+				std::memcpy(out, biases_, kHalfDimensions * sizeof(BiasType));
+			else
+				std::memset(out, 0, kHalfDimensions * sizeof(BiasType));
+			for (const auto index : active) add_row(out, index);
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.rows_full += active.size();
+#endif
+		} else {
+			std::memcpy(out, ent.accumulation, kHalfDimensions * sizeof(BiasType));
+			// ソート済み多重集合の差分 (merge walk): キャッシュにあって今無い → 減算、今あってキャッシュに無い → 加算
+			std::size_t a = 0, b = 0;
+			const std::size_t na = ent.n, nb = active.size();
+			[[maybe_unused]] uint64_t applied = 0;
+			while (a < na || b < nb) {
+				if (b >= nb || (a < na && ent.indices[a] < active[b])) {
+					sub_row(out, ent.indices[a]); ++a; ++applied;
+				} else if (a >= na || active[b] < ent.indices[a]) {
+					add_row(out, active[b]); ++b; ++applied;
+				} else {
+					++a; ++b;
+				}
+			}
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.rows_cache += applied;
+			g_ft_stat.n_cache_hit++;
+#endif
+		}
+		std::memcpy(ent.accumulation, out, kHalfDimensions * sizeof(BiasType));
+		for (std::size_t k = 0; k < active.size(); ++k) ent.indices[k] = active[k];
+		ent.n = static_cast<std::uint16_t>(active.size());
+		ent.valid = true;
+	}
+
+	mutable std::uint32_t load_generation_ = 1;
+#endif
 
 	// parameter type
 	// パラメータの型

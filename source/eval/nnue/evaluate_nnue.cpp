@@ -565,10 +565,10 @@ namespace {
             FILE* f = std::fopen(p, "a");
             if (!f)
                 return;
-            const uint64_t rows = g_ft_stat.rows_full + g_ft_stat.rows_inc;
+            const uint64_t rows = g_ft_stat.rows_full + g_ft_stat.rows_inc + g_ft_stat.rows_cache;
             std::fprintf(f,
                          "transform=%llu refresh=%llu update=%llu reset=%llu "
-                         "rows_full=%llu rows_inc=%llu rows_total=%llu "
+                         "rows_full=%llu rows_inc=%llu rows_cache=%llu cache_hit=%llu rows_total=%llu "
                          "full_share=%.4f rows_per_transform=%.2f "
                          "refresh_per_transform=%.4f reset_per_update=%.4f\n",
                          (unsigned long long)g_ft_stat.n_transform,
@@ -577,6 +577,8 @@ namespace {
                          (unsigned long long)g_ft_stat.n_reset,
                          (unsigned long long)g_ft_stat.rows_full,
                          (unsigned long long)g_ft_stat.rows_inc,
+                         (unsigned long long)g_ft_stat.rows_cache,
+                         (unsigned long long)g_ft_stat.n_cache_hit,
                          (unsigned long long)rows,
                          rows ? double(g_ft_stat.rows_full) / double(rows) : 0.0,
                          double(rows) / double(g_ft_stat.n_transform),

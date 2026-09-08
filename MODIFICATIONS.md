@@ -267,3 +267,14 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `source/Makefile`: edition 名に `_halfka2te_` を含むとき `-DNNUE_SFNN_HALFKA2TE` を定義。
   `source/config.h`: それを受けて KEEP_LAST_MOVE / LONG_EFFECT_LIBRARY / THREAT_EFFECT_DIFF を有効化
   (SFNN でも利き盤ベースの差分更新を使う)。
+
+## accumulator キャッシュ (Finny table) `ENABLE_ACC_CACHE` (2026-09-08, task#50)
+
+- `source/eval/nnue/nnue_feature_transformer.h`: 玉移動トリガ (kFriendKingMoved) の accumulator slot を、視点 × 自玉升ごとの
+  thread_local キャッシュ (その時の accumulator + ソート済 active index) との集合差分で作る。全再構築 (refresh) と玉移動 reset の
+  両方に適用。特徴集合に依存せず index 列だけで動く (HalfKP / HalfKA2 共通)。ネット再読込は generation で無効化。
+  整数加算の順序非依存性により結果はビット一致 (lite-diff / plain-512 で探索一致 20/20)。
+  `-DENABLE_ACC_CACHE` で有効 (既定は無効)。FT_TRAFFIC_STAT に rows_cache / cache_hit を追加。
+- 実測 (lite-diff + chainfix、20 局面 × 200k): 全再構築行 13.5M → 0.17M、キャッシュ差分 8.3 行/回、総行 −14.9%。
+- `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: qsearch TT ヒット経路の連鎖維持 (chainfix v2) は計測の結果
+  不採用 (コメントで記録)。
