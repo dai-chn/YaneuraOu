@@ -536,6 +536,11 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 			ifneq (,$(findstring _halfka2te_,$(YANEURAOU_EDITION)))
 				CPPFLAGS += -DNNUE_SFNN_HALFKA2TE
 			endif
+			# halfka2t (王者 SFNN + full threat): KEEP_LAST_MOVE を有効にして threat を差分更新にする
+			# (無いと Threat は毎手全再構築に落ちる)。-DTHREAT_NAIVE_REBUILD で旧挙動。
+			ifneq (,$(findstring _halfka2t_,$(YANEURAOU_EDITION)))
+				CPPFLAGS += -DNNUE_SFNN_HALFKA2T
+			endif
 		endif
 	endif
 
