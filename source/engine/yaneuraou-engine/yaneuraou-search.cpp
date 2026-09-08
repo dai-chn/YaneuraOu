@@ -4635,6 +4635,9 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 				unadjustedStaticEval = evaluate(pos);
 				// ⇨ NNUEだとこれ入れたほうが強い可能性が…。
 			}
+			// 📝 (2026-09-08 計測、report/52 §18.12) ここ (TT 評価値を使う non-PV 局面) でも
+			//     evaluate_with_no_return() で差分連鎖を維持する案 (chainfix v2) を試したが、
+			//     残る全再構築は 3,112 回/3.4M transform (0.09%) しかなく、更新行の増加で総行数は +2%。不採用。
 #endif
 
 			ss->staticEval = bestValue =
