@@ -65,6 +65,11 @@
 // halfkp+threat_512x2-16-32型 (task#52 Phase-1: 利き当たり特徴の連結)
 #include "architectures/halfkp_threat_512x2-16-32.h"
 
+#elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_768X2_16_32)
+
+// halfkp+threat_768x2-16-32型 (幅増加アーム、crate 004wa dropfact-768)
+#include "architectures/halfkp_threat_768x2-16-32.h"
+
 #elif defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32)
 
 // halfkp+threatlite_512x2-16-32型 (task#59: from-drop 縮約 26,244 次元)
