@@ -37,22 +37,15 @@ namespace Eval::NNUE {
 namespace Progress {
 
 	// SFNNのLayerStack選択に使う進行度計算パラメーター。
-	// nn.bin内ではFeatureTransformerの直後にこのセクションを置く。
+	// EvalDir/progress.bin: headerless little-endian doubles, without bias.
 	struct Parameters {
-		static constexpr int kProgressValueCount = 256;
 		static constexpr int kWeightCount = int(SQ_NB) * int(Eval::fe_end);
 
-		static constexpr std::uint32_t GetHashValue() {
-			return 0x6f50524fu; // "oPRO" : NNUE progress parameter section
-		}
-
 		Tools::Result ReadParameters(std::istream& stream);
-		bool WriteParameters(std::ostream& stream) const;
 
-		int Value0To255(const Position& pos) const;
+		std::int64_t SumQ16(const Position& pos) const;
 		int BucketIndex(const Position& pos, int bucket_count) const;
 
-		std::int32_t bias_q16_ = 0;
 		std::int32_t weights_q16_[SQ_NB][Eval::fe_end] = {};
 	};
 
@@ -63,12 +56,7 @@ namespace Progress {
 	// 評価関数の構造のハッシュ値
 #if defined(SFNNwoPSQT)
 	constexpr std::uint32_t kSfnnBaseHashValue = 0x3c203b32u;
-#if NNUE_SFNN_PROGRESS_BUCKETS != 1
-	constexpr std::uint32_t kHashValue =
-	    kSfnnBaseHashValue ^ Progress::Parameters::GetHashValue();
-#else
 	constexpr std::uint32_t kHashValue = kSfnnBaseHashValue;
-#endif
 	constexpr int kLayerStacks = LayerStacks;
 #else
 	constexpr std::uint32_t kHashValue =

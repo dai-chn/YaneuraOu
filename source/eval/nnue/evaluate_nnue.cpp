@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -434,12 +435,12 @@ namespace Progress {
 namespace {
 
 	constexpr double kQ16Scale = 65536.0;
-	constexpr int kProgressThresholdCount = Parameters::kProgressValueCount - 1;
+	constexpr int kProgressThresholdCount = NNUE_SFNN_PROGRESS_BUCKETS - 1;
 
 	std::array<std::int64_t, kProgressThresholdCount> make_thresholds_q16() {
 		std::array<std::int64_t, kProgressThresholdCount> thresholds{};
-		for (int i = 1; i < Parameters::kProgressValueCount; ++i) {
-			const double p = double(i) / double(Parameters::kProgressValueCount);
+		for (int i = 1; i < NNUE_SFNN_PROGRESS_BUCKETS; ++i) {
+			const double p = double(i) / double(NNUE_SFNN_PROGRESS_BUCKETS);
 			const double scaled = std::round(std::log(p / (1.0 - p)) * kQ16Scale);
 			const double clamped = std::clamp(
 			    scaled,
@@ -455,7 +456,7 @@ namespace {
 		return thresholds;
 	}
 
-	int progress_0_to_255_from_sum_q16(std::int64_t sum_q16) {
+	int bucket_from_sum_q16(std::int64_t sum_q16) {
 		const auto& thresholds = thresholds_q16();
 		const auto it = std::upper_bound(thresholds.begin(), thresholds.end(), sum_q16);
 		return int(it - thresholds.begin());
@@ -464,18 +465,26 @@ namespace {
 } // namespace
 
 Tools::Result Parameters::ReadParameters(std::istream& stream) {
-	bias_q16_ = read_little_endian<std::int32_t>(stream);
-	read_little_endian<std::int32_t>(stream, &weights_q16_[0][0], kWeightCount);
-	return !stream.fail() ? Tools::ResultCode::Ok : Tools::ResultCode::FileReadError;
+	static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
+	static_assert(kWeightCount == 81 * 1548);
+	for (auto& row : weights_q16_)
+		for (auto& weight : row) {
+			const auto bits = read_little_endian<std::uint64_t>(stream);
+			if (stream.fail()) return Tools::ResultCode::FileReadError;
+			double value;
+			std::memcpy(&value, &bits, sizeof(value));
+			// Check the IEEE exponent directly, also with -ffast-math enabled.
+			if ((bits & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL)
+				return Tools::ResultCode::FileMismatch;
+			weight = std::int32_t(std::clamp(std::round(value * kQ16Scale),
+			    double((std::numeric_limits<std::int32_t>::min)()),
+			    double((std::numeric_limits<std::int32_t>::max)())));
+		}
+	return stream.peek() == std::ios::traits_type::eof()
+	    ? Tools::ResultCode::Ok : Tools::ResultCode::FileMismatch;
 }
 
-bool Parameters::WriteParameters(std::ostream& stream) const {
-	stream.write(reinterpret_cast<const char*>(&bias_q16_), sizeof(bias_q16_));
-	stream.write(reinterpret_cast<const char*>(&weights_q16_[0][0]), sizeof(weights_q16_));
-	return !stream.fail();
-}
-
-int Parameters::Value0To255(const Position& pos) const {
+std::int64_t Parameters::SumQ16(const Position& pos) const {
 	const auto sq_bk = pos.square<KING>(BLACK);
 	const auto sq_wk = Inv(pos.square<KING>(WHITE));
 
@@ -490,7 +499,6 @@ int Parameters::Value0To255(const Position& pos) const {
 		const auto& list0 = pos.eval_list()->piece_list_fb();
 		const auto& list1 = pos.eval_list()->piece_list_fw();
 
-		sum_q16 = bias_q16_;
 		for (int i = 0; i < PIECE_NUMBER_KING; ++i) {
 			sum_q16 += weights_q16_[sq_bk][list0[i]];
 			sum_q16 += weights_q16_[sq_wk][list1[i]];
@@ -503,16 +511,15 @@ int Parameters::Value0To255(const Position& pos) const {
 		st->nnue_progress_valid = true;
 	}
 
-	return progress_0_to_255_from_sum_q16(sum_q16);
+	return sum_q16;
 }
 
 int Parameters::BucketIndex(const Position& pos, int bucket_count) const {
 	if (bucket_count <= 1)
 		return 0;
 
-	const int progress = Value0To255(pos);
-	const int bucket = progress * bucket_count / kProgressValueCount;
-	return std::clamp(bucket, 0, bucket_count - 1);
+	ASSERT_LV1(bucket_count == NNUE_SFNN_PROGRESS_BUCKETS);
+	return bucket_from_sum_q16(SumQ16(pos));
 }
 
 } // namespace Progress
@@ -623,7 +630,13 @@ namespace {
 			return result;
 		}
 #if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
-		result = Detail::ReadParameters<Progress::Parameters>(stream, tmp->progress);
+		const std::string eval_dir = Options["EvalDir"];
+		const auto progress_path = Path::Combine(
+		    Path::Combine(Directory::GetBinaryFolder(), eval_dir), "progress.bin");
+		std::ifstream progress_stream(progress_path, std::ios::binary);
+		sync_cout << "info string loading progress file : " << progress_path << sync_endl;
+		if (!progress_stream.is_open()) return Tools::ResultCode::FileNotFound;
+		result = tmp->progress.ReadParameters(progress_stream);
 		if (result.is_not_ok()) {
 			sync_cout << "info string NNUE progress params read failed: " << result.to_string() << sync_endl;
 			return result;
@@ -692,9 +705,6 @@ namespace {
     bool WriteParameters(std::ostream& stream) {
         if (!WriteHeader(stream, kHashValue, GetArchitectureString())) return false;
         if (!Detail::WriteParameters<FeatureTransformer>(stream, networks().feature_transformer)) return false;
-#if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
-        if (!Detail::WriteParameters<Progress::Parameters>(stream, networks().progress)) return false;
-#endif
         for (int i = 0; i < kLayerStacks; ++i) {
             if (!Detail::WriteParameters<Network>(stream, networks().network[i])) return false;
         }
