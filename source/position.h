@@ -256,6 +256,12 @@ struct PositionSetError : std::runtime_error {
 struct PackedSfen {
 	u8 data[32];
 
+	// 盤面を180度回転し、先後と手番を入れ替える。
+	// SFEN文字列やPosition::set()を経由せず、packed sfen上で変換する。
+	// (origin/master から移植: .ybb 定跡の FlippedBook probe 用、2026-09-10)
+	void flip();
+	PackedSfen flipped() const;
+
 	// 手番を返す。
 	Color color() const {
 		// これは、data[0]のbit0に格納されていることは保証されている。

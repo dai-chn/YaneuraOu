@@ -376,7 +376,6 @@ OBJC_SOURCES =
 ifeq (,)
 	SOURCES  +=                                                                \
 		book/makebook.cpp                                                      \
-		book/makebook2015.cpp                                                  \
 		book/makebook2025.cpp                                                  \
 		learn/learner.cpp                                                      \
 		learn/learning_tools.cpp                                               \

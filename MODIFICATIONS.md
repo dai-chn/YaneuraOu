@@ -278,3 +278,18 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 実測 (lite-diff + chainfix、20 局面 × 200k): 全再構築行 13.5M → 0.17M、キャッシュ差分 8.3 行/回、総行 −14.9%。
 - `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: qsearch TT ヒット経路の連鎖維持 (chainfix v2) は計測の結果
   不採用 (コメントで記録)。
+
+## 定跡サブシステムを upstream (origin/master) から移植: `.ybb` 対応 (2026-09-10, task#81)
+
+- `source/book/book.h` / `book.cpp` / `makebook.cpp` / `makebook2025.cpp` (+ `apery_book.*`, `policybook.*`): upstream master の版に置換。
+  やねうら王バイナリ定跡DB (`.ybb`, "YANE-BINBOOK-V1") の読み込み (BookOnTheFly=true は index 二分探索、false は丸読み)、
+  `BookFile=user_book1.db` で `.db` が無ければ `.ybb` に fallback、`makebook peta_shock` の `.ybb -> .ybb`、
+  優先定跡 (`user_book1-000.db` 等) の複数保持。`makebook2015.cpp` (旧 makebook コマンド群) は upstream 同様に削除。
+- `source/extra/sfen_packer.cpp`: `SfenPacker::pack_rawdata` / `unpack_rawdata`、`PackedSfen::flipped()` / `flip()` を追加
+  (FlippedBook の packed sfen 直接 flip probe 用)。`USE_SFEN_PACKER` ガードはこのフォークの構成に合わせて維持。
+  `source/position.h`: `PackedSfen` に `flip()` / `flipped()` を宣言。
+- `source/usioption.h` / `usioption.cpp`: `OptionsMap::read_engine_option_profile()` (`engine_option_profile.txt` の `BOOK_OPTIONS=V2` で
+  `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit` を生やし、`BookMoves` 既定 200、
+  `IgnoreBookPly` 既定 true にする)、`OptionsMapRef::count()` / `book_options_v2()` / `get_ref()`。
+  `source/usi.cpp`: `USIEngine::set_engine()` で `add_options()` の前に profile を読む。
+- 目的: ペタショック定跡 (peta15m、`.ybb` 頒布) を変換なしで使う。探索・評価には影響しない。

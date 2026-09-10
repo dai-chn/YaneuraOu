@@ -98,6 +98,11 @@ UCIEngine::UCIEngine(int argc, char** argv) :
 void USIEngine::set_engine(IEngine& _engine) {
     engine.set_engine(_engine);
 
+    // "engine_option_profile.txt"で、どのオプション群を生やすかを決める。
+    // これは"usi"応答より前に反映される必要がある。
+    // (origin/master から移植: BOOK_OPTIONS=V2 で BookEvalBlackDiff/WhiteDiff 等を生やす、2026-09-10)
+    engine.get_options().read_engine_option_profile("engine_option_profile.txt");
+
     // ⚠ やねうら王では、Engineのコンストラクタではoptionを生やさない設計に変更した。
     //     よって、派生classのadd_options()をここで明示的に呼び出してoptionを生やす必要がある。
     engine.add_options();
