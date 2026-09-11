@@ -1858,6 +1858,52 @@ namespace Book
 		return result;
 	}
 
+	// --- 定跡脱出 (ENABLE_BOOK_ESCAPE) 用
+
+	bool BookMoveSelector::has_position(Position& pos)
+	{
+		auto book_moves = find_in_books(pos);
+		return book_moves != nullptr && book_moves->size() != 0;
+	}
+
+	Move16 BookMoveSelector::best_book_move16(Position& pos)
+	{
+		auto book_moves = find_in_books(pos);
+		if (book_moves == nullptr || book_moves->size() == 0)
+			return Move16::none();
+		Move16 best = Move16::none();
+		int best_value = std::numeric_limits<int>::min();
+		book_moves->foreach([&](const BookMove& bm) {
+			if (bm.value > best_value)
+			{
+				best_value = bm.value;
+				best       = bm.move;
+			}
+		});
+		return best;
+	}
+
+	int BookMoveSelector::book_move_loss(Position& pos, Move16 m)
+	{
+		auto book_moves = find_in_books(pos);
+		if (book_moves == nullptr || book_moves->size() == 0)
+			return -2;
+		int best_value = std::numeric_limits<int>::min();
+		int my_value   = std::numeric_limits<int>::min();
+		bool found     = false;
+		book_moves->foreach([&](const BookMove& bm) {
+			best_value = std::max(best_value, bm.value);
+			if (bm.move == m)
+			{
+				my_value = bm.value;
+				found    = true;
+			}
+		});
+		if (!found)
+			return -1;
+		return best_value - my_value;
+	}
+
 
 	// 定跡部のUnitTest
 	void UnitTest(Test::UnitTester& tester, IEngine& engine)

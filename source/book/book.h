@@ -332,6 +332,15 @@ struct BookMoveSelector
 	*/
     ProbeResult probe(Position& pos, const Search::UpdateContext& updates);
 
+	// --- 定跡脱出 (ENABLE_BOOK_ESCAPE、2026-09-12) 用の副作用なしの問い合わせ
+	// 現局面が (優先定跡を含む) 定跡に登録されているか。
+	bool has_position(Position& pos);
+	// 定跡上の最善手 (value 最大)。登録が無ければ Move16::none()。BookEvalDiff 等のオプションは見ない。
+	Move16 best_book_move16(Position& pos);
+	// 定跡上で m を指したときの損 (最善 value − m の value、同値の最善は 0)。
+	// 局面が無ければ -2、局面はあるが m が登録されていなければ -1。
+	int book_move_loss(Position& pos, Move16 m);
+
 protected:
 	// メモリに読み込んだ定跡ファイル。
 	// user_book1-000.db, user_book1-001.ybb, user_book1.db のように、

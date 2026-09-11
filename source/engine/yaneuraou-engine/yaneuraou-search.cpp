@@ -26,6 +26,18 @@
 #include "../../misc.h"
 #include "../../tt.h"
 #include "../../book/book.h"
+
+#if defined(ENABLE_BOOK_ESCAPE)
+// 定跡脱出 (report/57 §4-1「二重逸脱」、2026-09-12):
+//   相手の直前手が定跡 (ペタショック) の最善手でないとき、こちらは定跡手を指さず MultiPV で探索し、
+//   最善から EscapeDelta [cp] 以内で「指した後の局面が定跡に無い」手を選ぶ (相手を早く自力思考に入らせる)。
+//   探索・評価は変えない。root での手の選択だけ。main thread が書き、他 thread は multiPV の上書きで読むだけ。
+namespace {
+bool g_escape_mode      = false;  // この探索が脱出モードか
+int  g_escape_count     = 0;      // この対局で脱出した回数
+int  g_escape_last_ply  = 0;      // 新対局検出用
+}
+#endif
 #include "../../movepick.h"
 #include "../../usi.h"
 #include "../../learn/learn.h"
@@ -322,6 +334,18 @@ void YaneuraOuEngine::add_options() {
 	// 📌 定跡が用いるオプションの追加
 
     book.add_options(options);
+
+#if defined(ENABLE_BOOK_ESCAPE)
+    // 定跡脱出 (二重逸脱): report/57 §4-1
+    options.add("BookEscape", Option(false));
+    options.add("EscapeDelta", Option(20, 0, 1000));      // 最善からの許容損 [cp]
+    options.add("EscapeMaxPly", Option(40, 0, 512));      // この手数以下でだけ脱出する
+    options.add("EscapeMultiPV", Option(4, 1, 20));       // 脱出モードの MultiPV
+    options.add("EscapeMaxCount", Option(2, 0, 100));     // 1 局あたりの脱出回数上限
+    options.add("EscapeSide", Option(std::vector<std::string>{"white", "black", "both"}, "white"));
+    options.add("EscapeOppDelta", Option(0, 0, 1000));   // 相手の直前手の定跡上の損がこれを超えたら「逸れた」とみなす (同値の最善は 0)
+    options.add("EscapeAlways", Option(false));           // テスト用: 相手の逸脱に関係なく定跡ヒット時は常に脱出モード
+#endif
 
     // 💡  以下の設定のうち、"isready"のタイミングでoptionsから値を取得するものに関しては
     //      event handlerは設定しない。
@@ -1053,6 +1077,48 @@ void Search::YaneuraOuWorker::start_searching() {
     // ---------------------
 
     probeResult = engine.book.probe(rootPos, main_manager()->updates);
+
+#if defined(ENABLE_BOOK_ESCAPE)
+    g_escape_mode = false;
+    if (rootPos.game_ply() < g_escape_last_ply)
+        g_escape_count = 0;   // 新しい対局
+    g_escape_last_ply = rootPos.game_ply();
+    if (probeResult.bestmove && bool(options["BookEscape"]))
+    {
+        const std::string side = std::string(options["EscapeSide"]);
+        const bool side_ok = side == "both" || (side == "white" && rootPos.side_to_move() == WHITE)
+                          || (side == "black" && rootPos.side_to_move() == BLACK);
+        if (side_ok && rootPos.game_ply() <= int(options["EscapeMaxPly"])
+            && g_escape_count < int(options["EscapeMaxCount"]))
+        {
+            // 相手の直前手が定跡最善でなければ「二重逸脱」の機会: 相手の木は薄い
+            bool opp_deviated = bool(options["EscapeAlways"]);
+#if defined(KEEP_LAST_MOVE)
+            Move last = rootPos.state()->lastMove;
+            if (!opp_deviated && last != Move::none() && last != Move::null() && rootPos.state()->previous != nullptr)
+            {
+                StateInfo* cur = rootPos.state();
+                rootPos.undo_move(last);
+                // 1 手前の局面での相手の手の定跡上の損。同値の最善 (複数) は 0。未登録 (-1) は「別の定跡」とみなして逸脱扱い。
+                int loss = engine.book.book_move_loss(rootPos, last.to_move16());
+                rootPos.do_move(last, *cur);
+                opp_deviated = (loss == -1) || (loss > int(options["EscapeOppDelta"]));
+                if (opp_deviated)
+                    sync_cout << "info string book escape: opponent move " << USIEngine::move(last)
+                              << " book loss " << loss << "cp" << sync_endl;
+            }
+#endif
+            if (opp_deviated)
+            {
+                g_escape_mode = true;
+                probeResult   = Book::ProbeResult();
+                sync_cout << "info string book escape: opponent left the book best, searching MultiPV "
+                          << int(options["EscapeMultiPV"]) << sync_endl;
+            }
+        }
+    }
+#endif
+
     if (probeResult.bestmove)
         goto SKIP_SEARCH;
 
@@ -1294,14 +1360,50 @@ SKIP_SEARCH:
 	}
     else
     {
+        size_t chosen = 0;
+#if defined(ENABLE_BOOK_ESCAPE)
+        if (g_escape_mode)
+        {
+            // 上位 EscapeMultiPV 手のうち、最善から EscapeDelta 以内で「指した後の局面が定跡に無い」最初の手
+            auto&  rm     = bestThread->rootMoves;
+            size_t n      = std::min(rm.size(), size_t(int(options["EscapeMultiPV"])));
+            int    delta  = int(options["EscapeDelta"]);
+            int    top_cp = USIEngine::to_cp(rm[0].score);
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (rm[i].pv.empty() || rm[i].score == -VALUE_INFINITE)
+                    continue;
+                int loss = top_cp - USIEngine::to_cp(rm[i].score);
+                if (loss > delta)
+                    break;
+                StateInfo si;
+                rootPos.do_move(rm[i].pv[0], si);
+                bool in_book = engine.book.has_position(rootPos);
+                rootPos.undo_move(rm[i].pv[0]);
+                sync_cout << "info string book escape: cand " << USIEngine::move(rm[i].pv[0]) << " loss " << loss
+                          << "cp in_book " << (in_book ? "yes" : "no") << sync_endl;
+                if (!in_book)
+                {
+                    chosen = i;
+                    if (i > 0)
+                        ++g_escape_count;
+                    sync_cout << "info string book escape: chose " << USIEngine::move(rm[i].pv[0])
+                              << " (rank " << i + 1 << ", loss " << loss << "cp, out of book)" << sync_endl;
+                    break;
+                }
+            }
+            if (chosen == 0)
+                sync_cout << "info string book escape: no exit within delta, playing best" << sync_endl;
+        }
+#endif
+        auto& best = bestThread->rootMoves[chosen];
 		// 🌈 extract_ponder_from_tt()に
 		//     ponder_candidateを渡して、ponderの指し手をひねり出す。
-        if (bestThread->rootMoves[0].pv.size() > 1
-            || bestThread->rootMoves[0].extract_ponder_from_tt(tt, rootPos,
-                                                               main_manager()->ponder_candidate))
-            ponder = USIEngine::move(bestThread->rootMoves[0].pv[1]);
+        if (best.pv.size() > 1
+            || (chosen == 0 && best.extract_ponder_from_tt(tt, rootPos, main_manager()->ponder_candidate)))
+            ponder = USIEngine::move(best.pv[1]);
 
-        bestmove = USIEngine::move(bestThread->rootMoves[0].pv[0]);
+        bestmove = USIEngine::move(best.pv[0]);
     }
 
 	/*
@@ -1427,6 +1529,10 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
     // 💡 bestmoveとしてしこの局面の上位N個を探索する機能
 
     size_t multiPV = size_t(options["MultiPV"]);
+#if defined(ENABLE_BOOK_ESCAPE)
+    if (g_escape_mode)
+        multiPV = std::max(multiPV, size_t(int(options["EscapeMultiPV"])));
+#endif
 
 #if STOCKFISH
     Skill skill(options["Skill Level"], options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0);
@@ -5629,6 +5735,10 @@ void SearchManager::pv(Search::YaneuraOuWorker&  worker,
     auto&      pos       = worker.rootPos;
     size_t     pvIdx     = worker.pvIdx;
     size_t     multiPV   = std::min(size_t(worker.options["MultiPV"]), rootMoves.size());
+#if defined(ENABLE_BOOK_ESCAPE)
+    if (g_escape_mode)
+        multiPV = std::min(std::max(multiPV, size_t(int(worker.options["EscapeMultiPV"]))), rootMoves.size());
+#endif
 #if STOCKFISH
     uint64_t tbHits = threads.tb_hits() + (worker.tbConfig.rootInTB ? rootMoves.size() : 0);
 #endif

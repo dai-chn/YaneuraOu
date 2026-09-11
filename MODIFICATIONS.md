@@ -295,3 +295,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 目的: ペタショック定跡 (peta15m、`.ybb` 頒布) を変換なしで使う。探索・評価には影響しない。
 - `source/usi.cpp` (2026-09-12): `go ... searchmoves` の指し手を小文字化しない (upstream 同様の修正)。将棋 USI の打ち駒 `P*5e` は駒種が大文字なので、
   小文字化すると指し手が解釈できなかった。定跡候補の再評価ハーネス (tools/book_reeval.py) が searchmoves を使う。
+
+## 定跡脱出 (二重逸脱) `ENABLE_BOOK_ESCAPE` (2026-09-12, task#81, report/57 §4-1)
+
+- `source/engine/yaneuraou-engine/yaneuraou-search.cpp`: root で定跡にヒットしても、**相手の直前手が定跡 (優先定跡 + ペタショック) の
+  最善手でない**ときは定跡手を指さず MultiPV (EscapeMultiPV) で探索し、最善から EscapeDelta [cp] 以内で「指した後の局面が定跡に無い」
+  最上位の手を bestmove にする (相手を早く自力思考に入らせる。相手の定跡木は「相手側 = 最善のみ」で伸びているので 2 番手は薄い)。
+  オプション: BookEscape / EscapeDelta / EscapeMaxPly / EscapeMultiPV / EscapeMaxCount (1 局の回数) / EscapeSide (white|black|both)。
+  探索・評価は不変。相手の直前手の判定は StateInfo::lastMove (KEEP_LAST_MOVE) を使い、1 手戻して定跡を引く。
+- `source/book/book.h` / `book.cpp`: `BookMoveSelector::has_position()` / `best_book_move16()` (副作用のない問い合わせ)。
+- `-DENABLE_BOOK_ESCAPE` で有効 (既定は無効)。
