@@ -293,3 +293,5 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `IgnoreBookPly` 既定 true にする)、`OptionsMapRef::count()` / `book_options_v2()` / `get_ref()`。
   `source/usi.cpp`: `USIEngine::set_engine()` で `add_options()` の前に profile を読む。
 - 目的: ペタショック定跡 (peta15m、`.ybb` 頒布) を変換なしで使う。探索・評価には影響しない。
+- `source/usi.cpp` (2026-09-12): `go ... searchmoves` の指し手を小文字化しない (upstream 同様の修正)。将棋 USI の打ち駒 `P*5e` は駒種が大文字なので、
+  小文字化すると指し手が解釈できなかった。定跡候補の再評価ハーネス (tools/book_reeval.py) が searchmoves を使う。
