@@ -305,3 +305,5 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   探索・評価は不変。相手の直前手の判定は StateInfo::lastMove (KEEP_LAST_MOVE) を使い、1 手戻して定跡を引く。
 - `source/book/book.h` / `book.cpp`: `BookMoveSelector::has_position()` / `best_book_move16()` (副作用のない問い合わせ)。
 - `-DENABLE_BOOK_ESCAPE` で有効 (既定は無効)。
+- (2026-09-12 追記) `EscapeNoRejoinPly` (既定 6): 候補手の PV をその手数だけ辿り、途中で定跡に戻る (合流する) 候補は採らない。
+  実測で単純な「子局面が定跡外」判定は 6 手以内にほぼ全件合流していたため。

@@ -345,6 +345,7 @@ void YaneuraOuEngine::add_options() {
     options.add("EscapeSide", Option(std::vector<std::string>{"white", "black", "both"}, "white"));
     options.add("EscapeOppDelta", Option(0, 0, 1000));   // 相手の直前手の定跡上の損がこれを超えたら「逸れた」とみなす (同値の最善は 0)
     options.add("EscapeAlways", Option(false));           // テスト用: 相手の逸脱に関係なく定跡ヒット時は常に脱出モード
+    options.add("EscapeNoRejoinPly", Option(6, 0, 20));   // 候補手の PV をこの手数辿って定跡に戻る (合流する) 手は採らない
 #endif
 
     // 💡  以下の設定のうち、"isready"のタイミングでoptionsから値を取得するものに関しては
@@ -1376,13 +1377,37 @@ SKIP_SEARCH:
                 int loss = top_cp - USIEngine::to_cp(rm[i].score);
                 if (loss > delta)
                     break;
+                // 指した後の局面が定跡に無く、かつ PV をたどって EscapeNoRejoinPly 手以内に定跡へ戻らない (合流しない) こと
                 StateInfo si;
                 rootPos.do_move(rm[i].pv[0], si);
-                bool in_book = engine.book.has_position(rootPos);
+                bool in_book   = engine.book.has_position(rootPos);
+                int  rejoin_at = 0;
+                if (!in_book)
+                {
+                    const int maxk = std::min(int(options["EscapeNoRejoinPly"]), int(rm[i].pv.size()) - 1);
+                    std::vector<StateInfo> sts(std::max(maxk, 0));
+                    int done = 0;
+                    for (int k = 1; k <= maxk; ++k)
+                    {
+                        Move pm = rm[i].pv[k];
+                        if (!(rootPos.pseudo_legal_s<true>(pm) && rootPos.legal(pm)))
+                            break;
+                        rootPos.do_move(pm, sts[k - 1]);
+                        ++done;
+                        if (engine.book.has_position(rootPos))
+                        {
+                            rejoin_at = k;
+                            break;
+                        }
+                    }
+                    for (int k = done; k >= 1; --k)
+                        rootPos.undo_move(rm[i].pv[k]);
+                }
                 rootPos.undo_move(rm[i].pv[0]);
                 sync_cout << "info string book escape: cand " << USIEngine::move(rm[i].pv[0]) << " loss " << loss
-                          << "cp in_book " << (in_book ? "yes" : "no") << sync_endl;
-                if (!in_book)
+                          << "cp in_book " << (in_book ? "yes" : "no")
+                          << (rejoin_at ? " rejoin_at " + std::to_string(rejoin_at) : "") << sync_endl;
+                if (!in_book && rejoin_at == 0)
                 {
                     chosen = i;
                     if (i > 0)
