@@ -587,7 +587,7 @@ namespace {
 
 	// テンポラリにパラメータを読み込み、共有メモリに配置する。
 	// 同じパラメータを持つ他プロセスが既に共有メモリを作成済みなら、そちらを参照する。
-	Tools::Result LoadAndShare(std::istream& stream) {
+	Tools::Result LoadAndShare(std::istream& stream, [[maybe_unused]] std::string* failed_file) {
 		// テンポラリ領域にパラメータを読み込む
 		auto tmp = make_unique_large_page<NnueNetworks>();
 
@@ -635,10 +635,13 @@ namespace {
 		    Path::Combine(Directory::GetBinaryFolder(), eval_dir), "progress.bin");
 		std::ifstream progress_stream(progress_path, std::ios::binary);
 		sync_cout << "info string loading progress file : " << progress_path << sync_endl;
-		if (!progress_stream.is_open()) return Tools::ResultCode::FileNotFound;
-		result = tmp->progress.ReadParameters(progress_stream);
+		result = progress_stream.is_open()
+		    ? tmp->progress.ReadParameters(progress_stream)
+		    : Tools::Result(Tools::ResultCode::FileNotFound);
 		if (result.is_not_ok()) {
-			sync_cout << "info string NNUE progress params read failed: " << result.to_string() << sync_endl;
+			if (failed_file) *failed_file = progress_path;
+			sync_cout << "info string NNUE progress params read failed: " << progress_path
+			          << " : " << result.to_string() << sync_endl;
 			return result;
 		}
 #endif
@@ -698,9 +701,9 @@ namespace {
     }
 
     	// 評価関数パラメータを読み込む
-    	Tools::Result ReadParameters(std::istream& stream) {
-    		return LoadAndShare(stream);
-    	}
+    Tools::Result ReadParameters(std::istream& stream, std::string* failed_file) {
+        return LoadAndShare(stream, failed_file);
+    }
     // 評価関数パラメータを書き込む
     bool WriteParameters(std::ostream& stream) {
         if (!WriteHeader(stream, kHashValue, GetArchitectureString())) return false;
@@ -1140,6 +1143,7 @@ void load_eval() {
 		// WASM
         const std::string file_name = Options["EvalFile"];
     #endif
+        std::string failed_file = file_name;
         const Tools::Result result = [&] {
             if (dir_name != "<internal>") {
 #if defined(_WIN32)
@@ -1163,11 +1167,12 @@ void load_eval() {
 #else
                 auto abs_eval_path = Path::Combine(Directory::GetBinaryFolder(), dir_name);
                 const std::string file_path = Path::Combine(abs_eval_path, file_name);
+                failed_file = file_path;
                 std::ifstream stream(file_path, std::ios::binary);
                 sync_cout << "info string loading eval file : " << file_path << sync_endl;
                 if (!stream.is_open())
                     return Tools::Result(Tools::ResultCode::FileNotFound);
-                return NNUE::ReadParameters(stream);
+                return NNUE::ReadParameters(stream, &failed_file);
 #endif
             }
             else {
@@ -1188,7 +1193,7 @@ void load_eval() {
                 std::istream stream(&buffer);
                 sync_cout << "info string loading eval file : <internal>" << sync_endl;
 
-                return NNUE::ReadParameters(stream);
+                return NNUE::ReadParameters(stream, &failed_file);
             }
         }();
 
@@ -1197,7 +1202,7 @@ void load_eval() {
         if (result.is_not_ok())
         {
             // 読み込みエラーのとき終了してくれないと困る。
-            sync_cout << "Error! : failed to read " << file_name << " : " << result.to_string() << sync_endl;
+            sync_cout << "Error! : failed to read " << failed_file << " : " << result.to_string() << sync_endl;
             Tools::exit();
         }
 

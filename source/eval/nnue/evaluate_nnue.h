@@ -99,7 +99,8 @@ namespace Progress {
 	    std::uint32_t hash_value, const std::string& architecture);
 
 	// 評価関数パラメータを読み込む
-	Tools::Result ReadParameters(std::istream& stream);
+	// On a sidecar read failure, replace failed_file with its path.
+	Tools::Result ReadParameters(std::istream& stream, std::string* failed_file = nullptr);
 
 	// 評価関数パラメータを書き込む
 	bool WriteParameters(std::ostream& stream);
