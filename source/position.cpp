@@ -2933,6 +2933,28 @@ bool Position::has_repeated() const {
 }
 #endif
 
+// 🌈 現局面と同一の局面 (盤面 + 手駒、手番は 2 手ずつ遡るので同じ) が遡り窓の中に何回あるか。DrawValueHistoryOnly 用。
+int Position::repetition_count() const
+{
+#if !defined(ENABLE_QUICK_DRAW)
+	// do_move() で数えてある (同一局面の出現回数 − 1)。
+	return st->repetition ? st->repetition_times : 0;
+#else
+	int end = std::min(max_repetition_ply, st->pliesFromNull);
+	if (end < 4)
+		return 0;
+	int n = 0;
+	StateInfo* stp = st->previous->previous;
+	for (int i = 4; i <= end; i += 2)
+	{
+		stp = stp->previous->previous;
+		if (stp->board_key == st->board_key && stp->hand == st->hand)
+			++n;
+	}
+	return n;
+#endif
+}
+
 // is_repetition()の、千日手が見つかった時に、現局面から何手遡ったかを返すバージョン。
 // found_plyにその値が返ってくる。
 RepetitionState Position::is_repetition(int ply, int& found_ply) const

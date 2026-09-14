@@ -796,6 +796,11 @@ public:
     // of positions since the last capture or pawn move.
     bool has_repeated() const;
 #endif
+
+    // 🌈 現局面と同一の局面が (遡り窓 max_repetition_ply 手の中で) これまでに何回現れたか (現局面を含まない)。
+    //     0 = 初出、1 = 2 回目、2 = 3 回目 …。DrawValueHistoryOnly の判定に使う:
+    //     探索は 2 回目の同一局面で打ち切るので、木の中のノードでこれが 2 以上なら、実際の対局で既に 1 巡している。
+    int repetition_count() const;
 #endif
 
 #if STOCKFISH

@@ -307,3 +307,20 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - `-DENABLE_BOOK_ESCAPE` で有効 (既定は無効)。
 - (2026-09-12 追記) `EscapeNoRejoinPly` (既定 6): 候補手の PV をその手数だけ辿り、途中で定跡に戻る (合流する) 候補は採らない。
   実測で単純な「子局面が定跡外」判定は 6 手以内にほぼ全件合流していたため。
+
+## 千日手の価値を実局面への反復に限る `DrawValueHistoryOnly` (2026-09-14, task#80/#81, report/57 §7.1)
+
+- `source/engine/yaneuraou-engine/yaneuraou-search.cpp` / `yaneuraou-search.h`: エンジンオプション `DrawValueHistoryOnly` (bool、既定 false)。
+  true のとき、search / qsearch の千日手判定 (`is_repetition`) で返す値を、**同一局面の出現回数**で分ける:
+  現局面が 2 回目 (木の中だけの反復、または実局面への最初の戻り) なら `DrawValueBlack/White` を乗せず `DrawValueTree` (int、既定 −2 =
+  従来の既定 DrawValue と同じ、root 側 +/相手側 − の同じ規約) の値、3 回目以降 (`Position::repetition_count() >= 2`) なら従来どおり
+  `draw_value()` (±DrawValue)。探索は 2 回目で打ち切るので、木の中で 3 回目に達するのは対局が既にその局面を 1 巡している場合に
+  限られる = 「本当に千日手が目前」のときだけ価値が乗る。対局が 1 巡するまでは `DrawValueHistoryOnly=true` + 任意の DrawValue が
+  既定と bestmove/score/PV まで完全一致することを固定ノード (1 スレッド) で確認 (2026-09-14)。
+- 動機: 既定の実装は木の中の 2 回目の同一局面を ±DrawValue で評価するため、|DrawValue| が大きいと「相手はいつでも千日手にできる」線が
+  全部 ±DrawValue になり、序中盤の棋風が壊れる (DrawValue ±100 で色別 ±250 Elo、千日手は増えない)。
+  v1 (前回の出現が root 以前なら乗せる) は直前の実手を戻す線が全部 ±D になり root の手が動いたので、出現回数方式に変更 (2026-09-14)。
+- `source/position.h` / `position.cpp`: `Position::repetition_count()` (遡り窓 `max_repetition_ply` 内の同一局面の回数。`ENABLE_QUICK_DRAW` 時は
+  走査、無効時は `StateInfo::repetition_times`)。`is_repetition(ply)` の呼び出しは `is_repetition(ply, found_ply)` に置き換えたが、
+  窓 (QUICK_DRAW は 16 手固定、それ以外は root まで + 4 回目) は同じ。
+- 探索・評価は既定 (false) では不変 (固定ノードで bestmove/score 一致を確認)。

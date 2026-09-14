@@ -235,6 +235,20 @@ void SearchOptions::add_options(OptionsMap& options) {
                     return std::nullopt;
                 }));
 
+    // 🌈 千日手の価値 (DrawValueBlack/White) を実際の対局で現れた局面への反復にだけ乗せる。
+    //     探索木の中だけで完結する反復 (前回の出現が root より後) は「相手はいつでも千日手にできる」という脅しに過ぎず、
+    //     |DrawValue| が大きいと静かな線が全部 ±DrawValue になって探索が壊れる (report/57 §7.1)。true ならそれを中立値にする。
+    options.add("DrawValueHistoryOnly", Option(false, [&](const Option& o) {
+                    draw_value_history_only = bool(o);
+                    return std::nullopt;
+                }));
+    // 🌈 DrawValueHistoryOnly=true のとき 3 回目未満の反復に使う値 (DrawValue と同じ単位)。既定 −2 = 従来の既定 DrawValue と同じ
+    //     なので、HistoryOnly を有効にしても対局が 1 巡するまでは従来の探索と完全に一致する。
+    options.add("DrawValueTree", Option(-2, -30000, 30000, [&](const Option& o) {
+                    draw_value_tree = int(o);
+                    return std::nullopt;
+                }));
+
     //  PVの出力の抑制のために前回出力時間からの間隔を指定できる。
     options.add("PvInterval", Option(300, 0, 100000000, [&](const Option& o) {
                     pv_interval = s64(o);
@@ -753,6 +767,21 @@ void update_correction_history(const Position&          pos,
 //     ⇨  TODO : もうちょっとどうにかする。
 Value value_draw(size_t nodes) { return VALUE_DRAW - 1 + Value(nodes & 0x2); }
 
+// 🌈 DrawValueHistoryOnly 用: is_repetition() が REPETITION_DRAW を返した現局面が「実際の対局で既に 1 巡した千日手筋」か。
+//     探索は 2 回目の同一局面で打ち切るので、木の中のノードで同一局面が 2 回以上前にも現れている (= 3 回目以降) なら、
+//     そのうち少なくとも 1 回は root より前 (実対局) にある = 対局が既にその局面を巡っている。
+//     2 回目 (木の中だけ、または実局面への最初の戻り) は千日手の「脅し」に過ぎないので中立値にする。
+//     (v1 は「前回の出現が root 以前」で判定したが、直前の実手を戻す線が全部 ±D になり root の手が動いた: 09-14 テスト)
+static inline bool repetition_anchored_in_game(const Position& pos, int ply, int found_ply)
+{
+    (void) ply; (void) found_ply;
+    return pos.repetition_count() >= 2;
+}
+
+// 🌈 DrawValueHistoryOnly=true のとき、3 回目未満の反復に返す値 (root 側 = +DrawValueTree、相手側 = −DrawValueTree、単位は DrawValue と同じ)。
+//     探索開始時に drawValueTable と同じ場所で設定する。
+static Value drawValueTreeTable[COLOR_NB] = { VALUE_ZERO, VALUE_ZERO };
+
 Value value_to_tt(Value v, int ply);
 Value value_from_tt(Value v, int ply /*, int r50c */);
 void  update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus);
@@ -972,6 +1001,11 @@ void Search::YaneuraOuWorker::start_searching() {
     // 例) 自分は引き分けを勝ち扱いだと思って探索しているなら、相手は、引き分けを負けとみなしてくれないと非対称になる。
     drawValueTable[REPETITION_DRAW][us]  = +draw_value;
     drawValueTable[REPETITION_DRAW][~us] = -draw_value;
+
+    // 🌈 DrawValueHistoryOnly 用: 3 回目未満の反復の値 (既定 −2 = 従来の既定 DrawValue と同じ扱い)
+    int draw_value_tree = (int) (options["DrawValueTree"] * Eval::PawnValue / 100);
+    drawValueTreeTable[us]  = Value(+draw_value_tree);
+    drawValueTreeTable[~us] = Value(-draw_value_tree);
 
     // 今回、通常探索をしたかのフラグ
     // このフラグがtrueなら(定跡にhitしたり1手詰めを発見したりしたので)探索をスキップした。
@@ -2476,14 +2510,24 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
                                                         : value_draw(nodes);
 #else
 
-		auto draw_type = pos.is_repetition(ss->ply);
+        int  found_ply = 0;
+#if defined(ENABLE_QUICK_DRAW)
+        auto draw_type = pos.is_repetition(16, found_ply);   // QUICK_DRAW の is_repetition(ply) と同じ 16 手窓
+#else
+        auto draw_type = pos.is_repetition(ss->ply, found_ply);
+#endif
         if (draw_type != REPETITION_NONE)
-        { 
+        {
             if (draw_type == REPETITION_DRAW)
+            {
+                // 🌈 DrawValueHistoryOnly: 探索木の中だけで完結する反復 (千日手の脅し) は中立値にする。
+                if (search_options.draw_value_history_only && !repetition_anchored_in_game(pos, ss->ply, found_ply))
+                    return drawValueTreeTable[pos.side_to_move()] + value_draw(nodes);
 				// 通常の千日手の時はゆらぎを持たせる。
 				// 💡 引き分けのスコアvは abs(v±1) <= VALUE_MAX_EVALであることが保証されているので、
 				//     value_from_tt()での変換は不要。
                 return draw_value(draw_type, pos.side_to_move()) + value_draw(nodes);
+            }
             else
 	            return value_from_tt(draw_value(draw_type, pos.side_to_move()), ss->ply);
         }
@@ -4628,7 +4672,12 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
     // 現局面の手番側のColor
     Color us = pos.side_to_move();
 
-    auto draw_type = pos.is_repetition(ss->ply);
+    int  found_ply = 0;
+#if defined(ENABLE_QUICK_DRAW)
+    auto draw_type = pos.is_repetition(16, found_ply);   // QUICK_DRAW の is_repetition(ply) と同じ 16 手窓
+#else
+    auto draw_type = pos.is_repetition(ss->ply, found_ply);
+#endif
     if (draw_type != REPETITION_NONE)
     /*
 			📓 なぜvalue_from_tt()が必要なのか？
@@ -4644,10 +4693,15 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 	*/
     {
         if (draw_type == REPETITION_DRAW)
+        {
+            // 🌈 DrawValueHistoryOnly: 探索木の中だけで完結する反復 (千日手の脅し) は中立値にする。
+            if (search_options.draw_value_history_only && !repetition_anchored_in_game(pos, ss->ply, found_ply))
+                return drawValueTreeTable[pos.side_to_move()] + value_draw(nodes);
             // 通常の千日手の時はゆらぎを持たせる。
             // 💡 引き分けのスコアvは abs(v±1) <= VALUE_MAX_EVALであることが保証されているので、
             //     value_from_tt()での変換は不要。
             return draw_value(draw_type, pos.side_to_move()) + value_draw(nodes);
+        }
 		else
 	        return value_from_tt(draw_value(draw_type, us), ss->ply);
     }

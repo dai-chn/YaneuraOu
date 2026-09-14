@@ -30,7 +30,15 @@ struct SearchOptions
         enteringKingRule         = EKR_27_POINT;
         lastPvInfoTime           = 0;
         computed_pv_interval     = 0;
+        draw_value_history_only  = false;
+        draw_value_tree          = -2;
     }
+
+    // 🌈 千日手の価値 (DrawValueBlack/White) を「対局が既に 1 巡した同一局面 (3 回目以降)」にだけ乗せ、
+    //     それ以外の反復 (探索木の中だけの反復 = 千日手の「脅し」、実局面への最初の戻り) は DrawValueTree の値にする。
+    // 📝 options["DrawValueHistoryOnly"] / options["DrawValueTree"] の設定値。
+    bool draw_value_history_only;
+    int  draw_value_tree;   // DrawValueHistoryOnly=true のとき、3 回目未満の反復に使う値 (DrawValue と同じ単位、既定 −2 = 従来の既定値)
 
     // この構造体メンバーに対応するエンジンオプションを生やす
     void add_options(OptionsMap& options);
