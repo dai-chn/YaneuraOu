@@ -334,3 +334,5 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   removed/added を集合比較し、不一致なら局面と手を出して即死 (研究ビルド)。`-DTHREAT_DIFF_STATS` に両版の rdtsc サイクル集計を追加。
 - 照合: xcheck ビルドで 20 局面 × 200k ノード (王者 tsfnn-526-q128 @13) = 3,547,135 回の収集で不一致 0。
   サイクル (L77 対局と同居、Core Ultra 7 265K): set 945 / exact 382 cycles/収集。
+- idle NPS (2026-09-18、nps_bench ABBA 40 局面 × 400k、2 回): 王者 exact/現行 = ×1.0795 / ×1.0769、classic lite = ×1.1002 / ×1.0986 → 採用
+  (新規ビルドの既定 define に `-DTHREAT_EXACT_DIFF` を合成)。
