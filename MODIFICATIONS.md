@@ -324,3 +324,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   走査、無効時は `StateInfo::repetition_times`)。`is_repetition(ply)` の呼び出しは `is_repetition(ply, found_ply)` に置き換えたが、
   窓 (QUICK_DRAW は 16 手固定、それ以外は root まで + 4 回目) は同じ。
 - 探索・評価は既定 (false) では不変 (固定ノードで bestmove/score 一致を確認)。
+
+## threat 差分収集の exact 化 `THREAT_EXACT_DIFF` / 照合 `THREAT_DIFF_XCHECK` (2026-09-18, task#59, report/52 §20)
+
+- `eval/nnue/features/threat.cpp`: 差分収集器を 2 つに分離。`collect_piece_diff_set` (従来: 影響 attacker の利き先を prev/now 両占有で
+  全列挙して対称差分) と `collect_piece_diff_exact` (新: 1 手で変わる対 = A 動いた駒が攻撃側 / B 動いた駒が被弾側 / C 取られた駒が攻撃側 /
+  D 取られた駒が被弾側 / E from・to を通る長い利きの駒の被弾集合のビットボード差分、の 5 群を直接出す。ソート・マージ・不変対の列挙なし)。
+- 既定は従来の set 版 (既存ビルドはビット同一)。`-DTHREAT_EXACT_DIFF` で exact 版。`-DTHREAT_DIFF_XCHECK` は両方を走らせて
+  removed/added を集合比較し、不一致なら局面と手を出して即死 (研究ビルド)。`-DTHREAT_DIFF_STATS` に両版の rdtsc サイクル集計を追加。
+- 照合: xcheck ビルドで 20 局面 × 200k ノード (王者 tsfnn-526-q128 @13) = 3,547,135 回の収集で不一致 0。
+  サイクル (L77 対局と同居、Core Ultra 7 265K): set 945 / exact 382 cycles/収集。

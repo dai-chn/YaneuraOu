@@ -282,17 +282,23 @@ void Threat::PermuteRows(std::int16_t* weights, std::size_t half_dims, std::size
 
 #if defined(THREAT_DIFF_STATS)
 // 診断用カウンタ (研究ビルド限定)。atexit で stderr に出す。
+// 2026-09-18: 差分収集 (collect_piece_diff_*) の rdtsc サイクルも集計する (列挙コストの直接計測、report/52 §18.9 の間接推定の検算)。
 #include <atomic>
+#include <x86intrin.h>
 namespace {
 std::atomic<uint64_t> g_refresh_calls{0}, g_changed_calls{0}, g_changed_rows{0},
-    g_prev_pairs{0}, g_now_pairs{0};
+    g_prev_pairs{0}, g_now_pairs{0}, g_collect_calls{0}, g_collect_cycles_set{0}, g_collect_cycles_exact{0};
 struct StatsPrinter {
     ~StatsPrinter() {
         std::fprintf(stderr,
-            "[threat-diff-stats] refresh=%llu changed=%llu rows/changed=%.2f prev+now_pairs/changed=%.2f" "\n",
+            "[threat-diff-stats] refresh=%llu changed=%llu rows/changed=%.2f prev+now_pairs/changed=%.2f"
+            " collect=%llu cycles/collect set=%.0f exact=%.0f\n",
             (unsigned long long)g_refresh_calls.load(), (unsigned long long)g_changed_calls.load(),
             g_changed_calls ? double(g_changed_rows) / double(g_changed_calls) : 0.0,
-            g_changed_calls ? double(g_prev_pairs + g_now_pairs) / double(g_changed_calls) : 0.0);
+            g_changed_calls ? double(g_prev_pairs + g_now_pairs) / double(g_changed_calls) : 0.0,
+            (unsigned long long)g_collect_calls.load(),
+            g_collect_calls ? double(g_collect_cycles_set) / double(g_collect_calls) : 0.0,
+            g_collect_calls ? double(g_collect_cycles_exact) / double(g_collect_calls) : 0.0);
     }
 } g_stats_printer;
 }
@@ -357,7 +363,17 @@ using ThreatPair = ThreatPiecePair;
 using ThreatDiffCache = ThreatPieceDiff;
 static thread_local ThreatDiffCache t_diff_cache;
 
-static void collect_piece_diff(const Position& pos, ThreatDiffCache& C);
+// 2 つの収集器:
+//   set   = 影響 attacker の利き先を prev/now 両占有で全列挙して対称差分 (task#37、場合分けなしで安全)
+//   exact = 変わる対だけを手の幾何から直接出す (2026-09-18、ユーザ案: ソート/マージ/不変対の列挙を全て省く)
+// 既定は set。-DTHREAT_EXACT_DIFF で exact、-DTHREAT_DIFF_XCHECK で両方走らせて集合一致を検査 (研究ビルド)。
+static void collect_piece_diff_set(const Position& pos, ThreatDiffCache& C);
+static void collect_piece_diff_exact(const Position& pos, ThreatDiffCache& C);
+
+#if defined(THREAT_DIFF_XCHECK)
+static thread_local ThreatDiffCache t_diff_cache2;
+static void xcheck_piece_diff(const Position& pos, const ThreatDiffCache& A, const ThreatDiffCache& B);
+#endif
 
 // 直前手による駒レベル threat 差分 (視点非依存)。BLACK 呼び出しで計算し、
 // 直後の WHITE 呼び出しはキャッシュヒットで再利用。StateInfo のアドレスは
@@ -375,7 +391,29 @@ const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
         C.key = (uint64_t)st->key();
         C.move = m.to_u32();
         C.n_removed = C.n_added = 0;
-        collect_piece_diff(pos, C);
+#if defined(THREAT_DIFF_XCHECK)
+        ThreatDiffCache& D = t_diff_cache2;
+        D.n_removed = D.n_added = 0;
+        THREAT_STAT(uint64_t t0 = __rdtsc();)
+        collect_piece_diff_set(pos, C);
+        THREAT_STAT(uint64_t t1 = __rdtsc();)
+        collect_piece_diff_exact(pos, D);
+        THREAT_STAT(uint64_t t2 = __rdtsc();
+                    g_collect_calls.fetch_add(1, std::memory_order_relaxed);
+                    g_collect_cycles_set.fetch_add(t1 - t0, std::memory_order_relaxed);
+                    g_collect_cycles_exact.fetch_add(t2 - t1, std::memory_order_relaxed);)
+        xcheck_piece_diff(pos, C, D);
+#elif defined(THREAT_EXACT_DIFF)
+        THREAT_STAT(uint64_t t0 = __rdtsc();)
+        collect_piece_diff_exact(pos, C);
+        THREAT_STAT(g_collect_calls.fetch_add(1, std::memory_order_relaxed);
+                    g_collect_cycles_exact.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);)
+#else
+        THREAT_STAT(uint64_t t0 = __rdtsc();)
+        collect_piece_diff_set(pos, C);
+        THREAT_STAT(g_collect_calls.fetch_add(1, std::memory_order_relaxed);
+                    g_collect_cycles_set.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);)
+#endif
     }
     return C;
 }
@@ -405,8 +443,8 @@ void Threat::AppendChangedIndices(const Position& pos, Color perspective,
     THREAT_STAT(g_changed_rows.fetch_add(C.n_removed + C.n_added, std::memory_order_relaxed);)
 }
 
-// 駒レベルの threat 差分を C.removed/C.added に収集する (視点非依存の 1 回だけの仕事)。
-static void collect_piece_diff(const Position& pos, ThreatDiffCache& C) {
+// 駒レベルの threat 差分を C.removed/C.added に収集する (視点非依存の 1 回だけの仕事)。set 版。
+static void collect_piece_diff_set(const Position& pos, ThreatDiffCache& C) {
     const StateInfo* st = pos.state();
     const Move m = st->lastMove;
     const Square to = m.to_sq();
@@ -500,6 +538,146 @@ static void collect_piece_diff(const Position& pos, ThreatDiffCache& C) {
         } else { ++i; ++j; }           // 両方に居る対 = 不変
     }
 }
+
+// exact 版 (2026-09-18): 1 手で変わる対を手の幾何から直接出す。不変対の列挙・ソート・マージを全て省く。
+//
+// 1 手で変わり得る対は次の 5 群で尽きていて、互いに素 (二重計上なし):
+//   A. 動いた駒が攻撃側の対: 旧升 (旧型) の利き先が全部消え、新升 (新型) の利き先が全部生える
+//   B. 動いた駒が被弾側の対: from に利いていた駒 (prev) との対が消え、to に利いている駒 (now) との対が生える
+//   C. 取られた駒が攻撃側の対: 全部消える (被弾側に動いた駒 (from) を含む)
+//   D. 取られた駒が被弾側の対: 全部消える (攻撃側が動いた駒の分は A に含まれるので除く)
+//   E. それ以外の駒 (攻撃側 ∉ {動いた駒, 取られた駒}、被弾側 ∉ {from, to}): 利き先が変わるのは
+//      from/to を通る方向線を持つ長い利きの駒だけ。その駒の被弾集合を prev/now でビットボード差分する
+//      (伸びた先/届かなくなった先は高々数升)。非スライダーの利き先は from/to 以外では変わらない。
+// 玉は攻守とも対に入らない (threat_class_of < 0)。打ちは from 無し、成りは旧型/新型で A/B の駒種が変わる。
+static void collect_piece_diff_exact(const Position& pos, ThreatDiffCache& C) {
+    const StateInfo* st = pos.state();
+    const Move m = st->lastMove;
+    const Square to = m.to_sq();
+    const bool drop = m.is_drop();
+    const Square from = drop ? SQ_NB : m.from_sq();
+    const Piece moved_now = pos.piece_on(to);
+    const Piece captured = st->capturedPiece;   // 無ければ NO_PIECE
+    const Color mc = color_of(moved_now);
+    const PieceType pt_now = type_of(moved_now);
+    const PieceType pt_prev = m.is_promote() ? PieceType(pt_now - PIECE_PROMOTE) : pt_now;
+    const Piece moved_prev = make_piece(mc, pt_prev);
+
+    const Bitboard occ_now = pos.pieces();
+    Bitboard occ_prev = occ_now;
+    if (captured == NO_PIECE)
+        occ_prev ^= Bitboard(to);      // 取りでなければ prev は to が空
+    if (!drop)
+        occ_prev |= Bitboard(from);    // prev は from に駒
+
+    // prev 視点での駒の解決: from -> 動いた駒 (旧型)、to -> 取られた駒、他は現盤面
+    auto prev_piece_on = [&](Square v) -> Piece {
+        if (!drop && v == from) return moved_prev;
+        if (v == to) return captured;
+        return pos.piece_on(v);
+    };
+    auto emit_removed = [&](Piece apc, Square asq, Piece vpc, Square vsq) {
+        if (threat_class_of(type_of(apc)) < 0 || threat_class_of(type_of(vpc)) < 0)
+            return;
+        ASSERT_LV1(C.n_removed < 128);
+        C.removed[C.n_removed++] = ThreatPair{uint8_t(apc), uint8_t(asq), uint8_t(vpc), uint8_t(vsq)};
+    };
+    auto emit_added = [&](Piece apc, Square asq, Piece vpc, Square vsq) {
+        if (threat_class_of(type_of(apc)) < 0 || threat_class_of(type_of(vpc)) < 0)
+            return;
+        ASSERT_LV1(C.n_added < 128);
+        C.added[C.n_added++] = ThreatPair{uint8_t(apc), uint8_t(asq), uint8_t(vpc), uint8_t(vsq)};
+    };
+    const bool mover_is_attacker = threat_class_of(pt_now) >= 0;   // 玉なら攻撃側の対は無い (pt_prev も玉)
+
+    // --- A. 動いた駒が攻撃側 ---
+    if (mover_is_attacker) {
+        if (!drop) {
+            Bitboard v = effects_from(moved_prev, from, occ_prev) & occ_prev;
+            while (v) { const Square s = v.pop(); emit_removed(moved_prev, from, prev_piece_on(s), s); }
+        }
+        Bitboard v = effects_from(moved_now, to, occ_now) & occ_now;
+        while (v) { const Square s = v.pop(); emit_added(moved_now, to, pos.piece_on(s), s); }
+    }
+    // --- C. 取られた駒が攻撃側 (prev のみ。被弾側 s == from は動いた駒の旧型) ---
+    if (captured != NO_PIECE && threat_class_of(type_of(captured)) >= 0) {
+        Bitboard v = effects_from(captured, to, occ_prev) & occ_prev;
+        while (v) { const Square s = v.pop(); emit_removed(captured, to, prev_piece_on(s), s); }
+    }
+    // from/to への利き (現盤面の駒配置、占有だけ prev/now で読み替え)。動いた駒 (to) は自身の升に利かないが、
+    // 旧升 from への利きには現れ得る (飛車が同じ筋を後退した等) ので prev 側では to を除く。
+    const Bitboard mover_bb = Bitboard(to);
+    Bitboard at_now  = pos.attackers_to(to, occ_now) & ~mover_bb;
+    Bitboard at_prev = pos.attackers_to(to, occ_prev) & ~mover_bb;
+    Bitboard af_prev, af_now;
+    if (!drop) {
+        af_prev = pos.attackers_to(from, occ_prev) & ~mover_bb;
+        af_now  = pos.attackers_to(from, occ_now) & ~mover_bb;
+    }
+    // --- B. 動いた駒が被弾側 ---
+    if (!drop) {
+        Bitboard a = af_prev;
+        while (a) { const Square s = a.pop(); emit_removed(pos.piece_on(s), s, moved_prev, from); }
+    }
+    {
+        Bitboard a = at_now;
+        while (a) { const Square s = a.pop(); emit_added(pos.piece_on(s), s, moved_now, to); }
+    }
+    // --- D. 取られた駒が被弾側 (prev のみ。動いた駒 (prev は from) は現盤面に from が無いので含まれない = A が担当) ---
+    if (captured != NO_PIECE) {
+        Bitboard a = at_prev;
+        while (a) { const Square s = a.pop(); emit_removed(pos.piece_on(s), s, captured, to); }
+    }
+    // --- E. from/to を通る長い利きの駒の被弾集合の差分 (被弾側 from/to は A〜D が担当なので除く) ---
+    {
+        Bitboard aff = at_now | at_prev;
+        if (!drop)
+            aff |= af_prev | af_now;
+        const Bitboard excl = drop ? mover_bb : (mover_bb | Bitboard(from));
+        while (aff) {
+            const Square s = aff.pop();
+            const Piece apc = pos.piece_on(s);
+            if (!has_long_effect(apc))
+                continue;                                  // 非スライダーの利き先は from/to 以外で変わらない
+            const Bitboard vp = effects_from(apc, s, occ_prev) & occ_prev & ~excl;
+            const Bitboard vn = effects_from(apc, s, occ_now) & occ_now & ~excl;
+            Bitboard rem = vp & ~vn;
+            Bitboard add = vn & ~vp;
+            while (rem) { const Square v = rem.pop(); emit_removed(apc, s, pos.piece_on(v), v); }
+            while (add) { const Square v = add.pop(); emit_added(apc, s, pos.piece_on(v), v); }
+        }
+    }
+}
+
+#if defined(THREAT_DIFF_XCHECK)
+// set 版と exact 版の removed/added を集合として比較。不一致なら局面と手を出して即死 (研究ビルド)。
+static void xcheck_piece_diff(const Position& pos, const ThreatDiffCache& A, const ThreatDiffCache& B) {
+    auto key = [](const ThreatPair& p) {
+        return (uint64_t(p.attacker_pc) << 24) | (uint64_t(p.attacker_sq) << 16)
+             | (uint64_t(p.victim_pc) << 8) | uint64_t(p.victim_sq);
+    };
+    auto sorted = [&](const ThreatPair* v, int n) {
+        std::vector<uint64_t> k(n);
+        for (int i = 0; i < n; ++i) k[i] = key(v[i]);
+        std::sort(k.begin(), k.end());
+        return k;
+    };
+    const auto ar = sorted(A.removed, A.n_removed), br = sorted(B.removed, B.n_removed);
+    const auto aa = sorted(A.added, A.n_added),     ba = sorted(B.added, B.n_added);
+    if (ar != br || aa != ba) {
+        std::fprintf(stderr, "FATAL: threat diff xcheck mismatch: sfen %s lastmove %s set(rem %d add %d) exact(rem %d add %d)\n",
+                     pos.sfen().c_str(), to_usi_string(pos.state()->lastMove).c_str(),
+                     A.n_removed, A.n_added, B.n_removed, B.n_added);
+        auto dump = [&](const char* name, const std::vector<uint64_t>& k) {
+            std::fprintf(stderr, "  %s:", name);
+            for (auto x : k) std::fprintf(stderr, " %llx", (unsigned long long)x);
+            std::fprintf(stderr, "\n");
+        };
+        dump("set.removed", ar); dump("exact.removed", br); dump("set.added", aa); dump("exact.added", ba);
+        std::exit(1);
+    }
+}
+#endif
 
 #else
 
