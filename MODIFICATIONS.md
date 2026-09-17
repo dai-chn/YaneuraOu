@@ -336,3 +336,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   サイクル (L77 対局と同居、Core Ultra 7 265K): set 945 / exact 382 cycles/収集。
 - idle NPS (2026-09-18、nps_bench ABBA 40 局面 × 400k、2 回): 王者 exact/現行 = ×1.0795 / ×1.0769、classic lite = ×1.1002 / ×1.0986 → 採用
   (新規ビルドの既定 define に `-DTHREAT_EXACT_DIFF` を合成)。
+
+## narrow threat slot `NNUE_THREAT_NARROW_COLS=N` + FT 計測の追加 define (2026-09-18, task#59 ⑤/⑥, report/52 §21.2〜21.3)
+
+- `eval/nnue/nnue_feature_transformer.h`:
+  - `NNUE_THREAT_NARROW_COLS=N`: 列マスクで訓練した SFNN halfka2t ネット (threat 行の重みが列 [0,N)∪[512,512+N) 以外で 0) 専用の推論経路。
+    threat (kRefreshTriggers[0] = kNone) の行を 2N 幅で格納 (`row_off()`、`kWeightsCount`)、accumulator の narrow slot は先頭 2N 要素だけ
+    使い (`slot_width()`)、バイアスは full slot (`kBiasSlot`) へ、Transform は各半分の先頭 N 列にだけ narrow slot を足す。nn.bin は
+    既存の全幅 LEB128 のままロード時にストリーム復号して圧縮格納し (`read_leb_128_sink`)、スライス外に非零があれば FileReadError。
+    通常ビルドでは kBiasSlot = 0 / slot_width = kHalf で従来と同一 (探索一致 20/20)。
+  - `FT_STAT_NO_ROW_TIMING` (行ごと rdtsc を外す) / `FT_STAT_ALIAS_THREAT_ROWS` (threat 行 index を 4096 で畳む、計測専用・評価は変わる)。
+- 検証 (09-18): exact2 (リファクタ後) vs hist2 = 探索一致 20/20 (王者ネット)、narrow128 vs exact2 = 探索一致 20/20 (slice128 sb46 ネット、
+  q128 export)、narrow128 に王者ネットを読ませると 134,395,171 個の非零を検出して読込失敗 (負のテスト OK)。
