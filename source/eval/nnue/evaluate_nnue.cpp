@@ -586,6 +586,19 @@ namespace {
                          g_ft_stat.n_update
                            ? double(g_ft_stat.n_reset) / double(g_ft_stat.n_update)
                            : 0.0);
+            // 行の足し引きの rdtsc サイクル (2026-09-18、report/52 §20): head = threat 行、tail = KP/KA2 行
+            std::fprintf(f,
+                         "cycles: inc_head=%.1f/row (%llu rows) inc_tail=%.1f/row (%llu rows) full=%.0f/transform "
+                         "update_total=%.0f/update collect=%.0f/update rows_part=%.0f/update refresh_total=%.0f/refresh\n",
+                         g_ft_stat.rows_inc_head ? double(g_ft_stat.cyc_inc_head) / double(g_ft_stat.rows_inc_head) : 0.0,
+                         (unsigned long long)g_ft_stat.rows_inc_head,
+                         g_ft_stat.rows_inc_tail ? double(g_ft_stat.cyc_inc_tail) / double(g_ft_stat.rows_inc_tail) : 0.0,
+                         (unsigned long long)g_ft_stat.rows_inc_tail,
+                         double(g_ft_stat.cyc_full) / double(g_ft_stat.n_transform),
+                         g_ft_stat.n_update ? double(g_ft_stat.cyc_update) / double(g_ft_stat.n_update) : 0.0,
+                         g_ft_stat.n_update ? double(g_ft_stat.cyc_collect) / double(g_ft_stat.n_update) : 0.0,
+                         g_ft_stat.n_update ? double(g_ft_stat.cyc_update - g_ft_stat.cyc_collect) / double(g_ft_stat.n_update) : 0.0,
+                         g_ft_stat.n_refresh ? double(g_ft_stat.cyc_refresh) / double(g_ft_stat.n_refresh) : 0.0);
             std::fclose(f);
         }
     };

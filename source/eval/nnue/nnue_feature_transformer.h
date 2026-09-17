@@ -41,6 +41,9 @@
 
 #include <algorithm>  // std::clamp
 #include <cstring>  // std::memset()
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+#include <x86intrin.h>  // __rdtsc (行の足し引きのサイクル計測、2026-09-18)
+#endif
 
 namespace YaneuraOu {
 namespace Eval::NNUE {
@@ -72,6 +75,17 @@ struct FtStat {
     uint64_t rows_inc    = 0;   // 差分で読んだ行数
     uint64_t rows_cache  = 0;   // (c) accumulator キャッシュ (ENABLE_ACC_CACHE) との集合差分で読んだ行数
     uint64_t n_cache_hit = 0;   // (c) キャッシュが有効だった (全再構築を差分に置き換えた) 回数
+    // 2026-09-18 (report/52 §20): 行の足し引きにかかる rdtsc サイクル (メモリ側の税の直接計測)。
+    //   差分更新の 1 行ごとに計測し、index が RawFeatures::kTailDimensions 以上 (= Head 特徴、threat 系では threat 行) と
+    //   それ未満 (Tail = KP/KA2 行) に分けて集計する。全再構築はループ全体で計測。
+    uint64_t cyc_inc_head = 0, rows_inc_head = 0;   // 差分更新: Head (threat) 行
+    uint64_t cyc_inc_tail = 0, rows_inc_tail = 0;   // 差分更新: Tail (KP/KA2) 行
+    uint64_t cyc_full     = 0;                      // 全再構築 (refresh + reset) の行加算ループ全体
+    uint64_t cyc_update   = 0;                      // update_accumulator 全体 (index 収集 + memcpy + 行加減算)
+    uint64_t cyc_collect  = 0;                      // update_accumulator 内の AppendChangedIndices (index 収集 = 列挙 + 写像) だけ
+    uint64_t cyc_refresh  = 0;                      // refresh_accumulator 全体
+    // 注: 行ごとの rdtsc は非直列化命令なので OoO 実行でロード待ちが後続に付け替わり得る (下限値)。
+    //     メモリ側の税は update_total − collect で読む (行の加減算 + memcpy + キャッシュ差分の合計)。
 };
 // C++17 の inline 変数。計測用ビルドのみなので TU をまたぐ定義の手間を省く。
 // Threads=1 前提 (計測用ビルドのみ。並列では数え落とす)。
@@ -663,6 +677,10 @@ class FeatureTransformer {
 	// Calculate cumulative value without using difference calculation
 	// 差分計算を用いずに累積値を計算する
 	void refresh_accumulator(const Position& pos) const {
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		const uint64_t t_ref0 = __rdtsc();
+		struct RefreshTimer { uint64_t t0; ~RefreshTimer() { g_ft_stat.cyc_refresh += __rdtsc() - t0; } } t_ref_timer{t_ref0};
+#endif
 		auto& accumulator = pos.state()->accumulator;
 		for (IndexType i = 0; i < kRefreshTriggers.size(); ++i) {
 			Features::IndexList active_indices[2];
@@ -680,6 +698,7 @@ class FeatureTransformer {
 #endif
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 				g_ft_stat.rows_full += active_indices[perspective].size();
+				const uint64_t t_full0 = __rdtsc();
 #endif
 #if defined(VECTOR)
 				if (i == 0) {
@@ -696,6 +715,9 @@ class FeatureTransformer {
 						accumulation[j] = vec_add_16(accumulation[j], column[j]);
 					}
 				}
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+				g_ft_stat.cyc_full += __rdtsc() - t_full0;
+#endif
 #else
 				if (i == 0) {
 					std::memcpy(accumulator.accumulation[perspective][i], biases_, kHalfDimensions * sizeof(BiasType));
@@ -721,13 +743,20 @@ class FeatureTransformer {
 	// Calculate cumulative value using difference calculation
 	// 差分計算を用いて累積値を計算する
 	void update_accumulator(const Position& pos) const {
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		const uint64_t t_upd0 = __rdtsc();
+#endif
 		const auto prev_accumulator = pos.state()->previous->accumulator;
 		auto&      accumulator      = pos.state()->accumulator;
 		for (IndexType i = 0; i < kRefreshTriggers.size(); ++i) {
 			Features::IndexList removed_indices[2], added_indices[2];
 			bool                reset[2];
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			const uint64_t t_col0 = __rdtsc();
+#endif
 			RawFeatures::AppendChangedIndices(pos, kRefreshTriggers[i], removed_indices, added_indices, reset);
 #if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.cyc_collect += __rdtsc() - t_col0;
 			if (i == 0) g_ft_stat.n_update++;
 			for (Color pc : {BLACK, WHITE}) {
 				const uint64_t rows = removed_indices[pc].size() + added_indices[pc].size();
@@ -787,6 +816,9 @@ class FeatureTransformer {
 					            kHalfDimensions * sizeof(BiasType));
 					for (const auto index : removed_indices[perspective]) {
 						const IndexType offset = kHalfDimensions * index;
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						const uint64_t t_row0 = __rdtsc();
+#endif
 #if defined(VECTOR)
 						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
 						for (IndexType j = 0; j < kNumChunks; ++j) {
@@ -797,6 +829,13 @@ class FeatureTransformer {
 							accumulator.accumulation[perspective][i][j] -= weights_[offset + j];
 						}
 #endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						{
+							const uint64_t dt = __rdtsc() - t_row0;
+							if (index >= RawFeatures::kTailDimensions) { g_ft_stat.cyc_inc_head += dt; g_ft_stat.rows_inc_head++; }
+							else                                       { g_ft_stat.cyc_inc_tail += dt; g_ft_stat.rows_inc_tail++; }
+						}
+#endif
 					}
 				}
 				{
@@ -804,6 +843,9 @@ class FeatureTransformer {
 					// 0から1に変化した特徴量に関する差分計算
 					for (const auto index : added_indices[perspective]) {
 						const IndexType offset = kHalfDimensions * index;
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						const uint64_t t_row0 = __rdtsc();
+#endif
 #if defined(VECTOR)
 						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
 						for (IndexType j = 0; j < kNumChunks; ++j) {
@@ -814,10 +856,21 @@ class FeatureTransformer {
 							accumulator.accumulation[perspective][i][j] += weights_[offset + j];
 						}
 #endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						{
+							const uint64_t dt = __rdtsc() - t_row0;
+							if (reset[perspective]) { g_ft_stat.cyc_full += dt; }
+							else if (index >= RawFeatures::kTailDimensions) { g_ft_stat.cyc_inc_head += dt; g_ft_stat.rows_inc_head++; }
+							else                                            { g_ft_stat.cyc_inc_tail += dt; g_ft_stat.rows_inc_tail++; }
+						}
+#endif
 					}
 				}
 			}
 		}
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		g_ft_stat.cyc_update += __rdtsc() - t_upd0;
+#endif
 
 		accumulator.computed_accumulation = true;
 		// Stockfishでは fc27d15(2020-09-07) にcomputed_scoreが排除されているので確認

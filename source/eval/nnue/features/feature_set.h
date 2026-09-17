@@ -140,6 +140,8 @@ class FeatureSet<FirstFeatureType, RemainingFeatureTypes...> :
   // 特徴量の次元数
   static constexpr IndexType kDimensions =
       Head::kDimensions + Tail::kDimensions;
+  // Head の index が始まる位置 (= Tail の次元数)。計測用 (ENABLE_FT_TRAFFIC_STAT で threat 行と KP/KA2 行を分ける)
+  static constexpr IndexType kTailDimensions = Tail::kDimensions;
   // 特徴量のうち、同時に値が1となるインデックスの数の最大値
   static constexpr IndexType kMaxActiveDimensions =
       Head::kMaxActiveDimensions + Tail::kMaxActiveDimensions;
@@ -205,6 +207,8 @@ class FeatureSet<FeatureType> : public FeatureSetBase<FeatureSet<FeatureType>> {
   // Number of feature dimensions
   // 特徴量の次元数
   static constexpr IndexType kDimensions = FeatureType::kDimensions;
+  // 単一特徴のときは Tail が無い (計測用の境界は 0 = 全行が Head 扱い)
+  static constexpr IndexType kTailDimensions = 0;
 
   // Maximum number of simultaneously active features
   // 特徴量のうち、同時に値が1となるインデックスの数の最大値
