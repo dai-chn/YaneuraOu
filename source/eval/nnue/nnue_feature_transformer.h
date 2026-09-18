@@ -85,6 +85,11 @@ struct FtStat {
     uint64_t cyc_update   = 0;                      // update_accumulator 全体 (index 収集 + memcpy + 行加減算)
     uint64_t cyc_collect  = 0;                      // update_accumulator 内の AppendChangedIndices (index 収集 = 列挙 + 写像) だけ
     uint64_t cyc_refresh  = 0;                      // refresh_accumulator 全体
+    // 2026-09-18 (report/52 §23.4): 評価 (ComputeScore = Transform + 密層) 全体と、走行の経過サイクル (最初の評価から最後の評価まで)。
+    //   ノード数は呼び出し側 (go nodes N × 局面数) が知っているので、eval 外 (探索側) の 1 ノードあたりコストは
+    //   (elapsed − cyc_eval) / nodes で出す。
+    uint64_t cyc_eval     = 0, n_eval = 0;
+    uint64_t t_first_eval = 0, t_last_eval = 0;
     // 注: 行ごとの rdtsc は非直列化命令なので OoO 実行でロード待ちが後続に付け替わり得る (下限値)。
     //     メモリ側の税は update_total − collect で読む (行の加減算 + memcpy + キャッシュ差分の合計)。
 };

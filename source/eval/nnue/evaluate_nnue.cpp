@@ -599,6 +599,14 @@ namespace {
                          g_ft_stat.n_update ? double(g_ft_stat.cyc_collect) / double(g_ft_stat.n_update) : 0.0,
                          g_ft_stat.n_update ? double(g_ft_stat.cyc_update - g_ft_stat.cyc_collect) / double(g_ft_stat.n_update) : 0.0,
                          g_ft_stat.n_refresh ? double(g_ft_stat.cyc_refresh) / double(g_ft_stat.n_refresh) : 0.0);
+            // 評価全体と経過サイクル (report/52 §23.4): eval 外の探索側コストは呼び出し側で (elapsed − eval_sum) / nodes
+            std::fprintf(f,
+                         "eval: n_eval=%llu eval_total=%.0f/eval eval_sum=%llu elapsed=%llu update_sum=%llu\n",
+                         (unsigned long long)g_ft_stat.n_eval,
+                         g_ft_stat.n_eval ? double(g_ft_stat.cyc_eval) / double(g_ft_stat.n_eval) : 0.0,
+                         (unsigned long long)g_ft_stat.cyc_eval,
+                         (unsigned long long)(g_ft_stat.t_last_eval - g_ft_stat.t_first_eval),
+                         (unsigned long long)g_ft_stat.cyc_update);
             std::fclose(f);
         }
     };
@@ -629,6 +637,11 @@ namespace {
         if (!refresh && accumulator.computed_score) {
             return accumulator.score;
         }
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+        const uint64_t t_ev0 = __rdtsc();
+        if (g_ft_stat.t_first_eval == 0) g_ft_stat.t_first_eval = t_ev0;
+        struct EvalTimer { uint64_t t0; ~EvalTimer() { const uint64_t t1 = __rdtsc(); g_ft_stat.cyc_eval += t1 - t0; g_ft_stat.n_eval++; g_ft_stat.t_last_eval = t1; } } t_ev_timer{t_ev0};
+#endif
 
         alignas(kCacheLineSize) TransformedFeatureType
             transformed_features[FeatureTransformer::kBufferSize];
