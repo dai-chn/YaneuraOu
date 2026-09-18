@@ -358,3 +358,19 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   B=1 (従来 narrow) と非 narrow ビルドは変更なし。
 - 検証 (09-18 12:00): narrow128 (B=1、リファクタ後) vs exact2 = 探索一致 20/20 (slice128 sb46 ネット)、narrow128-b4 (B=4) vs exact2 =
   探索一致 **20/20** (slice128 sb46 の threat 行を B=4 規則でマスクした合成ネット `synth-b4-q128`、tmp/synth_block_state.py)。
+
+## FT 差分更新のレジスタタイル化 `NNUE_FT_TILED` (2026-09-18, task#82, report/52 §23)
+
+- `eval/nnue/nnue_feature_transformer.h`:
+  - 従来の `update_accumulator` は「前局面の accumulator を memcpy → removed/added の**行ごとに accumulator 全幅を読み書き**」で、
+    行 1 本あたり acc 読み + acc 書き + 行読み = 3 × 幅 (1024 × 2 B) のトラフィックだった (Stockfish 2020-08 の初版 NNUE と同じ形。
+    SF は 2020-09 にタイル化済)。さらに `const auto prev_accumulator = ...->accumulator` が**値コピー** (accumulator 構造体 8 KB 超を
+    update のたびに丸写し) だった。
+  - `apply_rows_tiled()`: accumulator を kNumRegs × vec_t (AVX2: 16 × 16 値 = 512 B) のタイルに分け、タイルをレジスタに載せたまま
+    全行のそのタイル部分を加減算してから 1 回だけ書き戻す (行読み 1 × 幅 だけ)。出発点は前局面 / バイアス / 0。端数はチャンク単位。
+    `update_accumulator` (差分・reset)、`refresh_accumulator`、`build_from_cache` (ENABLE_ACC_CACHE、merge walk で rem/add を集めてから
+    1 回) が使う。prev_accumulator は参照に変更。VECTOR ビルドの既定、`-DNNUE_FT_NO_TILING` で従来経路、行ごと rdtsc 計測ビルド
+    (ENABLE_FT_TRAFFIC_STAT かつ FT_STAT_NO_ROW_TIMING なし) は自動で従来経路。ブロック疎 (B>1) の narrow slot は従来経路のまま。
+  - 整数加減算の順序非依存性により結果はビット一致。
+- 検証 (09-18 13:10): tiled vs exact2 (従来) = 探索一致 20/20 (王者ネット tsfnn-526-q128)、plain SFNN halfka2 tiled vs notiled = 20/20
+  (sfnn-3way)、notiled (同ソース、-DNNUE_FT_NO_TILING) vs exact2 = 10/10。NPS は report/52 §23。
