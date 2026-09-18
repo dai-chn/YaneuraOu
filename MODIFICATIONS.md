@@ -375,5 +375,6 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 検証 (09-18 13:10): tiled vs exact2 (従来) = 探索一致 20/20 (王者ネット tsfnn-526-q128)、plain SFNN halfka2 tiled vs notiled = 20/20
   (sfnn-3way)、notiled (同ソース、-DNNUE_FT_NO_TILING) vs exact2 = 10/10、classic HalfKP 768 tiled vs notiled = 20/20。
 - NPS (idle、nps_bench ABBA 40 局面 × 400k、Threads 1、2 回、report/52 §23.2): 王者 halfka2t **×1.089 / ×1.090**、plain SFNN halfka2
-  ×1.046 / ×1.046、narrow128 との合成 (narrow128-tiled / tiled) ×1.252 / ×1.255 (直交)。`-DFT_ROW_PREFETCH` はタイル化の上では
+  ×1.046 / ×1.046、narrow128 との合成 (narrow128-tiled / tiled) ×1.252 / ×1.255 (直交)。
+  **`prev_accumulator` の参照化だけで ×1.062 / ×1.063** (notiled ビルド vs 旧 exact2、§23.5) → このコミット全体で旧ビルド比 ×1.157、PGO 込み ×1.166。`-DFT_ROW_PREFETCH` はタイル化の上では
   ×1.006 (n.s.) なので既定に入れない。classic 768 は負荷下 ×1.016 (n.s.、行数が少ない)。
