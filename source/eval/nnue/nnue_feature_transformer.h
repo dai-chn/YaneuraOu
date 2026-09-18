@@ -264,11 +264,14 @@ class FeatureTransformer {
 	//   集中しているので、clip したままだと多くの局面で評価が動く: 87 局面で一致 61%、|差| 最大 44cp)。
 	//   行に残差があるかはビット表 (kInputDimensions bits ≈ 43 KB) で見て、あれば行 index の二分探索で範囲を引く。
 	//   (FeatureTransformer は SystemWideSharedConstant に載る = 自明コピー可能でないといけないので、表は固定長配列で持つ)
+	//   ★行に残差があるかの判定は「行の先頭バイトが −128 (clip 範囲 ±127 に無い番兵)」で行う。行データは行ループが読んだばかりで
+	//   キャッシュにあるので判定はほぼ無料 (別のビット表を引く版は表がキャッシュから追い出されて 1 update 630 cycles = NPS −8% だった)。
+	//   番兵にした先頭要素の本当の値は残差表の col 0 に (delta = v0 + 128) 入れる。
 	struct FixEntry { std::uint16_t col; std::int16_t delta; };
 	static constexpr std::size_t kMaxFixRows = std::size_t(1) << 16, kMaxFix = std::size_t(1) << 17;
-	std::uint64_t fix_bits_[(std::size_t(RawFeatures::kDimensions) + 63) / 64];
-	std::uint32_t fix_row_[kMaxFixRows];       // 残差のある行 index (昇順)
-	std::uint32_t fix_start_[kMaxFixRows + 1]; // fix_row_[k] の残差 = fix_[fix_start_[k] .. fix_start_[k+1])
+	static constexpr RowType kFixSentinel = RowType(-128);
+	std::uint32_t fix_idx_[RawFeatures::kDimensions]; // 行 index → 残差ブロック番号 k (残差の無い行は未使用)
+	std::uint32_t fix_start_[kMaxFixRows + 1];       // ブロック k の残差 = fix_[fix_start_[k] .. fix_start_[k+1])
 	FixEntry      fix_[kMaxFix];
 	std::uint32_t n_fix_rows_ = 0, n_fix_ = 0;
 	// 行内の格納位置 col → その行が足される accumulator 上の位置
@@ -282,15 +285,23 @@ class FeatureTransformer {
 		(void)index;
 		return col;
 	}
+	// 残差のある行だけが来る遅い経路 (二分探索 + 疎な加減算)。行ループの codegen を汚さないよう noinline。
 	template <bool kAdd>
-	inline void fix_row(BiasType* acc, IndexType index) const {
-		if (!((fix_bits_[index >> 6] >> (index & 63)) & 1)) return;
-		const std::uint32_t* it = std::lower_bound(fix_row_, fix_row_ + n_fix_rows_, std::uint32_t(index));
-		const std::size_t k = std::size_t(it - fix_row_);
+	__attribute__((noinline)) void fix_row_slow(BiasType* acc, IndexType index) const {
+		const std::size_t k = fix_idx_[index];
 		for (std::uint32_t e = fix_start_[k]; e < fix_start_[k + 1]; ++e) {
 			const IndexType pos = fix_acc_pos(index, fix_[e].col);
 			acc[pos] = static_cast<BiasType>(kAdd ? acc[pos] + fix_[e].delta : acc[pos] - fix_[e].delta);
 		}
+	}
+	template <bool kAdd>
+	inline void fix_row(BiasType* acc, IndexType index) const {
+#if defined(NNUE_FT_INT8_NO_RESIDUAL)
+		// 計測用: 残差表を引かない (clip したままの評価 = NNUE_FT_CLIP127_TEST の int16 ビルドと探索一致、残差表のコストを切り分ける)
+		(void)acc; (void)index; return;
+#endif
+		if (__builtin_expect(weights_[row_off(index)] == kFixSentinel, 0))
+			fix_row_slow<kAdd>(acc, index);
 	}
 #else
 	template <bool kAdd>
@@ -412,6 +423,13 @@ class FeatureTransformer {
 	                             const IndexType* add, std::size_t n_add) const {
 		constexpr IndexType kChunk = sizeof(vec_t) / sizeof(BiasType);
 		constexpr IndexType kTile  = kNumRegs * kChunk;
+#if defined(NNUE_FT_INT8_ROWS) && !defined(NNUE_FT_INT8_NO_RESIDUAL)
+		// 残差のある行 (先頭バイトが番兵) をタイルループの前に拾う。この読みは行の先頭ラインの prefetch を兼ねる。
+		IndexType frem[RawFeatures::kMaxActiveDimensions], fadd[RawFeatures::kMaxActiveDimensions];
+		std::size_t nfr = 0, nfa = 0;
+		for (std::size_t r = 0; r < n_rem; ++r) if (__builtin_expect(weights_[row_off(rem[r])] == kFixSentinel, 0)) frem[nfr++] = rem[r];
+		for (std::size_t r = 0; r < n_add; ++r) if (__builtin_expect(weights_[row_off(add[r])] == kFixSentinel, 0)) fadd[nfa++] = add[r];
+#endif
 		IndexType j = 0;
 		for (; j + kTile <= width; j += kTile) {
 			vec_t regs[kNumRegs];
@@ -441,9 +459,9 @@ class FeatureTransformer {
 				v = vec_add_16(v, vec_load_row(&weights_[row_off(add[r]) + j]));
 			vec_store(reinterpret_cast<vec_t*>(acc + j), v);
 		}
-#if defined(NNUE_FT_INT8_ROWS)
-		for (std::size_t r = 0; r < n_rem; ++r) fix_row<false>(acc, rem[r]);
-		for (std::size_t r = 0; r < n_add; ++r) fix_row<true>(acc, add[r]);
+#if defined(NNUE_FT_INT8_ROWS) && !defined(NNUE_FT_INT8_NO_RESIDUAL)
+		for (std::size_t k = 0; k < nfr; ++k) fix_row_slow<false>(acc, frem[k]);
+		for (std::size_t k = 0; k < nfa; ++k) fix_row_slow<true>(acc, fadd[k]);
 #endif
 	}
 #endif
@@ -577,7 +595,6 @@ class FeatureTransformer {
 				clipped += std::size_t(c != v);
 				weights_[i] = static_cast<RowType>(c);
 			}
-			std::memset(fix_bits_, 0, sizeof(fix_bits_));
 			n_fix_rows_ = 0; n_fix_ = 0;
 			for (IndexType r = 0; r < kInputDimensions; ++r) {
 				const std::size_t base = row_off(r);
@@ -590,15 +607,24 @@ class FeatureTransformer {
 				for (IndexType c = 0; c < width; ++c) {
 					const int v = wtmp[base + c];
 					if (v > 127 || v < -127) {
-						if (n_fix_ >= kMaxFix || n_fix_rows_ >= kMaxFixRows) {
+						if (n_fix_ + 2 > kMaxFix || n_fix_rows_ >= kMaxFixRows) {
 							std::fprintf(stderr, "Error! NNUE_FT_INT8_ROWS: residual table overflow (rows %u, entries %u)\n", n_fix_rows_, n_fix_);
 							return Tools::ResultCode::FileReadError;
 						}
-						if (!any) { fix_row_[n_fix_rows_] = r; fix_start_[n_fix_rows_] = n_fix_; ++n_fix_rows_; any = true; }
+						if (!any) {
+							// この行は残差あり: 先頭要素を番兵 −128 にし、その本当の値 v0 (clip 済み) との差を col 0 の残差として先に積む
+							any = true;
+							fix_idx_[r] = n_fix_rows_; fix_start_[n_fix_rows_] = n_fix_; ++n_fix_rows_;
+							const int v0 = wtmp[base];
+							const int c0 = v0 > 127 ? 127 : (v0 < -127 ? -127 : v0);
+							fix_[n_fix_++] = FixEntry{std::uint16_t(0), std::int16_t(v0 - int(kFixSentinel))};
+							weights_[base] = kFixSentinel;
+							if (c == 0) continue;   // col 0 の残差は上で (clip 分も込みで) 積んだ
+							(void)c0;
+						}
 						fix_[n_fix_++] = FixEntry{std::uint16_t(c), std::int16_t(v - (v > 127 ? 127 : -127))};
 					}
 				}
-				if (any) fix_bits_[r >> 6] |= std::uint64_t(1) << (r & 63);
 			}
 			fix_start_[n_fix_rows_] = n_fix_;
 			if (clipped)
