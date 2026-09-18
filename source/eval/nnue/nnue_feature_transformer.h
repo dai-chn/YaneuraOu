@@ -269,11 +269,46 @@ class FeatureTransformer {
 	              "NNUE_THREAT_NARROW_COLS needs FeatureSet<Threat (kNone), Base (kFriendKingMoved)>");
 	static_assert(kNarrowCols % 32 == 0 && kNarrowCols * 2 <= kHalfDimensions, "narrow cols must be a multiple of 32");
 	static_assert(kHeadRows > 0, "no Head feature");
-	static constexpr IndexType slot_width(IndexType slot) { return slot == kNarrowSlot ? kNarrowWidth : kHalfDimensions; }
+	// ブロック疎 (report/52 §21.5、NNUE_THREAT_NARROW_BLOCKS=B > 1): threat 行 t はブロック b = t % B を持ち、その 2N 値を
+	// full 幅 accumulator の列 [b*N, b*N+N) と [kHalf/2 + b*N, ...) に足す。行の格納は B=1 と同じ 2N 幅。narrow slot は full 幅になり、
+	// Transform は通常の全 slot 合算 (B=1 のときだけ先頭 N 列の短縮経路)。
+#if !defined(NNUE_THREAT_NARROW_BLOCKS)
+#define NNUE_THREAT_NARROW_BLOCKS 1
+#endif
+	static constexpr IndexType kNarrowBlocks = NNUE_THREAT_NARROW_BLOCKS;
+	static_assert(kNarrowBlocks >= 1 && kNarrowCols * kNarrowBlocks * 2 <= kHalfDimensions, "narrow blocks x cols must fit in kHalf/2");
+	static constexpr bool narrow_blocked() { return kNarrowBlocks > 1; }
+	static constexpr IndexType narrow_block(IndexType index) { return kNarrowBlocks > 1 ? (index - kTailRows) % kNarrowBlocks : 0; }
+	// accumulator 上の slot 幅 (B>1 の narrow slot は full 幅) と、格納行の幅 (narrow 行は常に 2N)
+	static constexpr IndexType slot_width(IndexType slot) { return (slot == kNarrowSlot && kNarrowBlocks == 1) ? kNarrowWidth : kHalfDimensions; }
+	static constexpr IndexType row_width(IndexType slot) { return slot == kNarrowSlot ? kNarrowWidth : kHalfDimensions; }
+	// B>1 用: narrow 行 (2N 値) を full 幅 accumulator のブロック位置に足す (kAdd) / 引く
+	template <bool kAdd>
+	inline void apply_narrow_row(BiasType* acc, IndexType index) const {
+		const WeightType* row = &weights_[row_off(index)];
+		const IndexType b = narrow_block(index);
+		BiasType* a0 = acc + b * kNarrowCols;
+		BiasType* a1 = acc + kHalfDimensions / 2 + b * kNarrowCols;
+#if defined(VECTOR)
+		constexpr IndexType kChunks = kNarrowCols / (sizeof(vec_t) / sizeof(BiasType));
+		auto v0 = reinterpret_cast<vec_t*>(a0); auto v1 = reinterpret_cast<vec_t*>(a1);
+		auto c0 = reinterpret_cast<const vec_t*>(row); auto c1 = reinterpret_cast<const vec_t*>(row + kNarrowCols);
+		for (IndexType j = 0; j < kChunks; ++j) {
+			v0[j] = kAdd ? vec_add_16(v0[j], c0[j]) : vec_sub_16(v0[j], c0[j]);
+			v1[j] = kAdd ? vec_add_16(v1[j], c1[j]) : vec_sub_16(v1[j], c1[j]);
+		}
+#else
+		for (IndexType j = 0; j < kNarrowCols; ++j) {
+			if (kAdd) { a0[j] += row[j]; a1[j] += row[kNarrowCols + j]; }
+			else      { a0[j] -= row[j]; a1[j] -= row[kNarrowCols + j]; }
+		}
+#endif
+	}
 #else
 	static constexpr IndexType kBiasSlot = 0;
 	static constexpr std::size_t kWeightsCount = std::size_t(kHalfDimensions) * kInputDimensions;
 	static constexpr IndexType slot_width(IndexType /*slot*/) { return kHalfDimensions; }
+	static constexpr IndexType row_width(IndexType /*slot*/) { return kHalfDimensions; }
 #endif
 
 #if defined(NNUE_FT_SCRELU)
@@ -346,16 +381,18 @@ class FeatureTransformer {
 					const std::size_t k = i - tail_count;
 					const std::size_t r = k / kHalfDimensions, c = k % kHalfDimensions;
 					WeightType* row = &weights_[tail_count + r * kNarrowWidth];
-					if (c < kNarrowCols)
-						row[c] = v;
-					else if (c >= kHalfDimensions / 2 && c < kHalfDimensions / 2 + kNarrowCols)
-						row[kNarrowCols + (c - kHalfDimensions / 2)] = v;
+					const std::size_t lo0 = (kNarrowBlocks > 1 ? (r % kNarrowBlocks) : 0) * kNarrowCols;
+					const std::size_t lo1 = kHalfDimensions / 2 + lo0;
+					if (c >= lo0 && c < lo0 + kNarrowCols)
+						row[c - lo0] = v;
+					else if (c >= lo1 && c < lo1 + kNarrowCols)
+						row[kNarrowCols + (c - lo1)] = v;
 					else if (v != 0)
 						++violations;
 				});
 			if (violations != 0) {
-				std::fprintf(stderr, "Error! narrow threat build (N=%u): %llu nonzero weights outside the slice — not a slice-trained net\n",
-				             unsigned(kNarrowCols), (unsigned long long)violations);
+				std::fprintf(stderr, "Error! narrow threat build (N=%u, blocks=%u): %llu nonzero weights outside the slice — not a slice-trained net\n",
+				             unsigned(kNarrowCols), unsigned(kNarrowBlocks), (unsigned long long)violations);
 				return Tools::ResultCode::FileReadError;
 			}
 		}
@@ -459,9 +496,9 @@ class FeatureTransformer {
 			// ★複数 refresh trigger (halfka2t 等) では平面を全て合算する。
 			//   平面 0 固定読みだと threat 等の追加平面が出力に乗らない (task#54 で実害)。
 			vec_t* out = reinterpret_cast<vec_t*>(output + offset);
-#if defined(NNUE_THREAT_NARROW_COLS)
+#if defined(NNUE_THREAT_NARROW_COLS) && NNUE_THREAT_NARROW_BLOCKS == 1
 			// narrow slot (threat) は先頭 2N 要素 = [前半の先頭 N 列][後半の先頭 N 列]。full slot (KA2 + バイアス) に
-			// 各半分の先頭 N 列 (= kNarrowChunks ベクトル) だけ足す。
+			// 各半分の先頭 N 列 (= kNarrowChunks ベクトル) だけ足す。(ブロック疎 B>1 では narrow slot が full 幅なので通常経路)
 			constexpr IndexType kVecElems     = sizeof(vec_t) / sizeof(BiasType);
 			constexpr IndexType kNarrowChunks = kNarrowCols / kVecElems;
 			static_assert(kNarrowCols % kVecElems == 0, "narrow cols must be a multiple of the vector width");
@@ -528,7 +565,7 @@ class FeatureTransformer {
 
 			for (IndexType j = 0; j < kHalfDimensions / 2; ++j)
 			{
-#if defined(NNUE_THREAT_NARROW_COLS)
+#if defined(NNUE_THREAT_NARROW_COLS) && NNUE_THREAT_NARROW_BLOCKS == 1
 				BiasType sum0 = accumulation[perspectives[p]][kBiasSlot][j];
 				BiasType sum1 = accumulation[perspectives[p]][kBiasSlot][j + kHalfDimensions / 2];
 				if (j < kNarrowCols) {
@@ -852,6 +889,9 @@ class FeatureTransformer {
 					std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 				}
 				for (const auto index : active_indices[perspective]) {
+#if defined(NNUE_THREAT_NARROW_COLS)
+					if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#endif
 					const IndexType offset = row_off(index);
 					auto accumulation      = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
 					auto column            = reinterpret_cast<const vec_t*>(&weights_[offset]);
@@ -870,6 +910,9 @@ class FeatureTransformer {
 					std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 				}
 				for (const auto index : active_indices[perspective]) {
+#if defined(NNUE_THREAT_NARROW_COLS)
+					if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#endif
 					const IndexType offset = row_off(index);
 
 					for (IndexType j = 0; j < slot_width(i); ++j) {
@@ -925,12 +968,12 @@ class FeatureTransformer {
 				for (const auto index : removed_indices[pf_p]) {
 					const auto* row = reinterpret_cast<const char*>(&weights_[row_off(index)]);
 					_mm_prefetch(row, _MM_HINT_T0);
-					_mm_prefetch(row + slot_width(i), _MM_HINT_T0);   // 行の中間 (bytes = dims*2/2)
+					_mm_prefetch(row + row_width(i), _MM_HINT_T0);   // 行の中間 (bytes = dims*2/2)
 				}
 				for (const auto index : added_indices[pf_p]) {
 					const auto* row = reinterpret_cast<const char*>(&weights_[row_off(index)]);
 					_mm_prefetch(row, _MM_HINT_T0);
-					_mm_prefetch(row + slot_width(i), _MM_HINT_T0);
+					_mm_prefetch(row + row_width(i), _MM_HINT_T0);
 				}
 			}
 #endif
@@ -960,6 +1003,9 @@ class FeatureTransformer {
 					std::memcpy(accumulator.accumulation[perspective][i], prev_accumulator.accumulation[perspective][i],
 					            slot_width(i) * sizeof(BiasType));
 					for (const auto index : removed_indices[perspective]) {
+#if defined(NNUE_THREAT_NARROW_COLS)
+						if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<false>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#endif
 						const IndexType offset = row_off(index);
 #if defined(ENABLE_FT_TRAFFIC_STAT) && !defined(FT_STAT_NO_ROW_TIMING)
 						const uint64_t t_row0 = __rdtsc();
@@ -987,6 +1033,9 @@ class FeatureTransformer {
 					// Difference calculation for features that changed from 0 to 1
 					// 0から1に変化した特徴量に関する差分計算
 					for (const auto index : added_indices[perspective]) {
+#if defined(NNUE_THREAT_NARROW_COLS)
+						if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#endif
 						const IndexType offset = row_off(index);
 #if defined(ENABLE_FT_TRAFFIC_STAT) && !defined(FT_STAT_NO_ROW_TIMING)
 						const uint64_t t_row0 = __rdtsc();

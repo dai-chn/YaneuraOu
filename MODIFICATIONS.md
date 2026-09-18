@@ -348,3 +348,13 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   - `FT_STAT_NO_ROW_TIMING` (行ごと rdtsc を外す) / `FT_STAT_ALIAS_THREAT_ROWS` (threat 行 index を 4096 で畳む、計測専用・評価は変わる)。
 - 検証 (09-18): exact2 (リファクタ後) vs hist2 = 探索一致 20/20 (王者ネット)、narrow128 vs exact2 = 探索一致 20/20 (slice128 sb46 ネット、
   q128 export)、narrow128 に王者ネットを読ませると 134,395,171 個の非零を検出して読込失敗 (負のテスト OK)。
+
+## narrow threat slot のブロック疎化 `NNUE_THREAT_NARROW_BLOCKS=B` (2026-09-18, task#59 ⑦, report/52 §21.5)
+
+- `eval/nnue/nnue_feature_transformer.h`: threat 行 t (Head 側の index − kTailRows) はブロック b = t % B を使い、列 [b·N, b·N+N) ∪
+  [512 + b·N, …) にだけ重みを持つ (訓練側 BulletOu `--threat-slice-blocks B` の列マスクと同じ規則)。格納は B=1 と同じ 2N 幅
+  (`row_width()`)、ロード時のスライス外検査も行ごとのブロックで行う。B>1 では accumulator の narrow slot を full 幅で持ち
+  (`slot_width()` = kHalf)、行の加減算は `apply_narrow_row<kAdd>()` が各半分のブロック位置へ直接足す (Transform 側の narrow 加算は不要)。
+  B=1 (従来 narrow) と非 narrow ビルドは変更なし。
+- 検証 (09-18 12:00): narrow128 (B=1、リファクタ後) vs exact2 = 探索一致 20/20 (slice128 sb46 ネット)、narrow128-b4 (B=4) vs exact2 =
+  探索一致 **20/20** (slice128 sb46 の threat 行を B=4 規則でマスクした合成ネット `synth-b4-q128`、tmp/synth_block_state.py)。
