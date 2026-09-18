@@ -376,5 +376,21 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   (sfnn-3way)、notiled (同ソース、-DNNUE_FT_NO_TILING) vs exact2 = 10/10、classic HalfKP 768 tiled vs notiled = 20/20。
 - NPS (idle、nps_bench ABBA 40 局面 × 400k、Threads 1、2 回、report/52 §23.2): 王者 halfka2t **×1.089 / ×1.090**、plain SFNN halfka2
   ×1.046 / ×1.046、narrow128 との合成 (narrow128-tiled / tiled) ×1.252 / ×1.255 (直交)。
-  **`prev_accumulator` の参照化だけで ×1.062 / ×1.063** (notiled ビルド vs 旧 exact2、§23.5) → このコミット全体で旧ビルド比 ×1.157、PGO 込み ×1.166。`-DFT_ROW_PREFETCH` はタイル化の上では
+  **`prev_accumulator` の参照化だけで ×1.062 / ×1.063** (notiled ビルド vs 旧 exact2、§23.5) → このコミット全体で旧ビルド比 ×1.157、PGO 込み ×1.166。
+
+## FT 重みの int8 行 `NNUE_FT_INT8_ROWS` (2026-09-18, task#82, report/52 §23.6、既定 OFF)
+
+- `eval/nnue/nnue_feature_transformer.h`: FT 重みを nn.bin の値 (w×127) のまま `int8` で格納し (`RowType`)、従来のロード時 ×2
+  (`scale_weights`) を掛けない。行ロードは `vec_load_row()` (AVX2 `vpmovsxbw` / AVX-512 版) で int16 に拡張。accumulator は従来の
+  1/2 スケールになるので Transform で `(a'<<8)·(c'<<1) >> 16 = (2a')(2c') >> 9` (`kFtHalfScale`)、スカラー経路は clamp 127 / ÷128。
+  |v| > 127 の重み (王者 tsfnn-526 で 6,900 / 357M、列 398/194/171 等の少数のニューロンに集中) は clip し、差分を**残差表**
+  (行ごとの疎な (col, delta)、`fix_row<kAdd>()`、行ビット表 + 二分探索) で行の加減算の後に足す → **int16 経路とビット一致**
+  (clip だけだと 87 局面で一致 61%、|差| 最大 44cp、探索一致 0/20 になる)。FeatureTransformer は SystemWideSharedConstant に載るため
+  表は固定長配列 (kMaxFixRows 65,536 / kMaxFix 131,072、超えたら FileReadError)。`WriteParameters` は未対応 (false)。
+  ロードは int16 の一時領域 (kWeightsCount × 2 B) で従来の permute / attacker-major 置換をしてから int8 へ落とす
+  (`permute_weights(order_fn, wts)` に配列引数を追加)。`NNUE_FT_CLIP127_TEST` は int16 経路に同じ clip を掛ける検証用。
+- 検証 (09-18 23:00): tiled-v2 (同ソース、int8 なし) vs tiled = 探索一致 10/10 (回帰なし)、int8 vs int16+clip127 = 20/20 (算術一致)、
+  **int8 (残差表) vs tiled = 探索一致 20/20、静的評価 77/77 局面一致**。
+- NPS (idle、王者ネット、ABBA 40 × 400k、2 回): **×1.0134 / ×1.0127 (ノイズ床 1.3〜1.5%、n.s.)** → AVX2 では効かない (行のバイト数は
+  半分になるが `vpmovsxbw` が行あたり 64 回 port 5 に入り、メモリの節約分を相殺する、と推定)。AVX-512 機 (#83) で再測。既定には入れない。`-DFT_ROW_PREFETCH` はタイル化の上では
   ×1.006 (n.s.) なので既定に入れない。classic 768 は負荷下 ×1.016 (n.s.、行数が少ない)。

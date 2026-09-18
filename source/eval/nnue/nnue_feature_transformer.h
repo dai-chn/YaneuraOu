@@ -41,6 +41,8 @@
 
 #include <algorithm>  // std::clamp
 #include <cstring>  // std::memset()
+#include <vector>   // NNUE_FT_INT8_ROWS のロード時一時領域
+#include <algorithm>  // std::lower_bound (NNUE_FT_INT8_ROWS の残差表)
 #include <cstdio>   // std::fprintf (narrow threat ロード検査のエラー出力)
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 #include <x86intrin.h>  // __rdtsc (行の足し引きのサイクル計測、2026-09-18)
@@ -225,6 +227,75 @@ class FeatureTransformer {
 	using OutputType = TransformedFeatureType;
 	using BiasType   = std::int16_t;
 	using WeightType = std::int16_t;
+#if defined(NNUE_FT_INT8_ROWS)
+	// ★int8 行 (task#82 / report/52 §23.6): FT 重みを nn.bin の値 (w×127、|v| ≤ 127 に clip) のまま int8 で格納し、
+	//   従来の「ロード時 ×2 (scale_weights)」を掛けない。accumulator は従来の 1/2 スケールになり、Transform で
+	//   (a'<<8)·(c'<<1) >> 16 = a'c' >> 7 = (2a')(2c') >> 9 として従来と同じ出力を得る (|v|>127 で clip された重み以外はビット一致)。
+	//   行の読みが半分 (2 KB → 1 KB) になり、L2 帯域律速の行ループ (§23.4: update の 8 割) が軽くなる。VECTOR (AVX2/AVX-512) +
+	//   USE_ELEMENT_WISE_MULTIPLY 専用。int8 → int16 の拡張は行ロード時 (vpmovsxbw)。
+	using RowType = std::int8_t;
+	static constexpr int kFtHalfScale = 1;
+#if !defined(USE_ELEMENT_WISE_MULTIPLY) || !defined(USE_AVX2)
+#error "NNUE_FT_INT8_ROWS needs USE_ELEMENT_WISE_MULTIPLY (SFNN) and AVX2/AVX-512"
+#endif
+#else
+	using RowType = WeightType;
+	static constexpr int kFtHalfScale = 0;
+#endif
+#if defined(VECTOR)
+	// 重み行の 1 ベクトル分 (int16 × kSimdWidth/2 個) をロードする。int8 行なら符号拡張しながら。
+	static inline vec_t vec_load_row(const RowType* p) {
+#if defined(NNUE_FT_INT8_ROWS)
+#if defined(USE_AVX512)
+		return _mm512_cvtepi8_epi16(_mm256_load_si256(reinterpret_cast<const __m256i*>(p)));
+#else
+		return _mm256_cvtepi8_epi16(_mm_load_si128(reinterpret_cast<const __m128i*>(p)));
+#endif
+#else
+		return vec_load(reinterpret_cast<const vec_t*>(p));
+#endif
+	}
+	static constexpr IndexType kVecElems = sizeof(vec_t) / sizeof(BiasType);
+#endif
+
+#if defined(NNUE_FT_INT8_ROWS)
+	// ★残差表: |v| > 127 で clip した重みの差分 (v − clip(v)) を行ごとに疎に持ち、行の加減算の後に足す。
+	//   これで int16 経路とビット一致になる (王者では 6,900 個 / 5,291 行、行ごと平均 1.3 個。列 398/194/171 等の少数のニューロンに
+	//   集中しているので、clip したままだと多くの局面で評価が動く: 87 局面で一致 61%、|差| 最大 44cp)。
+	//   行に残差があるかはビット表 (kInputDimensions bits ≈ 43 KB) で見て、あれば行 index の二分探索で範囲を引く。
+	//   (FeatureTransformer は SystemWideSharedConstant に載る = 自明コピー可能でないといけないので、表は固定長配列で持つ)
+	struct FixEntry { std::uint16_t col; std::int16_t delta; };
+	static constexpr std::size_t kMaxFixRows = std::size_t(1) << 16, kMaxFix = std::size_t(1) << 17;
+	std::uint64_t fix_bits_[(std::size_t(RawFeatures::kDimensions) + 63) / 64];
+	std::uint32_t fix_row_[kMaxFixRows];       // 残差のある行 index (昇順)
+	std::uint32_t fix_start_[kMaxFixRows + 1]; // fix_row_[k] の残差 = fix_[fix_start_[k] .. fix_start_[k+1])
+	FixEntry      fix_[kMaxFix];
+	std::uint32_t n_fix_rows_ = 0, n_fix_ = 0;
+	// 行内の格納位置 col → その行が足される accumulator 上の位置
+	inline IndexType fix_acc_pos(IndexType index, IndexType col) const {
+#if defined(NNUE_THREAT_NARROW_COLS)
+		if (kNarrowBlocks > 1 && index >= kTailRows) {
+			const IndexType b = narrow_block(index);
+			return col < kNarrowCols ? b * kNarrowCols + col : kHalfDimensions / 2 + b * kNarrowCols + (col - kNarrowCols);
+		}
+#endif
+		(void)index;
+		return col;
+	}
+	template <bool kAdd>
+	inline void fix_row(BiasType* acc, IndexType index) const {
+		if (!((fix_bits_[index >> 6] >> (index & 63)) & 1)) return;
+		const std::uint32_t* it = std::lower_bound(fix_row_, fix_row_ + n_fix_rows_, std::uint32_t(index));
+		const std::size_t k = std::size_t(it - fix_row_);
+		for (std::uint32_t e = fix_start_[k]; e < fix_start_[k + 1]; ++e) {
+			const IndexType pos = fix_acc_pos(index, fix_[e].col);
+			acc[pos] = static_cast<BiasType>(kAdd ? acc[pos] + fix_[e].delta : acc[pos] - fix_[e].delta);
+		}
+	}
+#else
+	template <bool kAdd>
+	inline void fix_row(BiasType*, IndexType) const {}
+#endif
 
 #if defined(ENABLE_ACC_CACHE)
 	// ★accumulator キャッシュ ("Finny table"、task#50 / report/52 §18.13)
@@ -297,17 +368,17 @@ class FeatureTransformer {
 	// B>1 用: narrow 行 (2N 値) を full 幅 accumulator のブロック位置に足す (kAdd) / 引く
 	template <bool kAdd>
 	inline void apply_narrow_row(BiasType* acc, IndexType index) const {
-		const WeightType* row = &weights_[row_off(index)];
+		const RowType* row = &weights_[row_off(index)];
 		const IndexType b = narrow_block(index);
 		BiasType* a0 = acc + b * kNarrowCols;
 		BiasType* a1 = acc + kHalfDimensions / 2 + b * kNarrowCols;
 #if defined(VECTOR)
-		constexpr IndexType kChunks = kNarrowCols / (sizeof(vec_t) / sizeof(BiasType));
+		constexpr IndexType kChunks = kNarrowCols / kVecElems;
 		auto v0 = reinterpret_cast<vec_t*>(a0); auto v1 = reinterpret_cast<vec_t*>(a1);
-		auto c0 = reinterpret_cast<const vec_t*>(row); auto c1 = reinterpret_cast<const vec_t*>(row + kNarrowCols);
 		for (IndexType j = 0; j < kChunks; ++j) {
-			v0[j] = kAdd ? vec_add_16(v0[j], c0[j]) : vec_sub_16(v0[j], c0[j]);
-			v1[j] = kAdd ? vec_add_16(v1[j], c1[j]) : vec_sub_16(v1[j], c1[j]);
+			const vec_t c0 = vec_load_row(row + j * kVecElems), c1 = vec_load_row(row + kNarrowCols + j * kVecElems);
+			v0[j] = kAdd ? vec_add_16(v0[j], c0) : vec_sub_16(v0[j], c0);
+			v1[j] = kAdd ? vec_add_16(v1[j], c1) : vec_sub_16(v1[j], c1);
 		}
 #else
 		for (IndexType j = 0; j < kNarrowCols; ++j) {
@@ -315,6 +386,7 @@ class FeatureTransformer {
 			else      { a0[j] -= row[j]; a1[j] -= row[kNarrowCols + j]; }
 		}
 #endif
+		fix_row<kAdd>(acc, index);
 	}
 #else
 	static constexpr IndexType kBiasSlot = 0;
@@ -350,12 +422,12 @@ class FeatureTransformer {
 				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_zero();
 			}
 			for (std::size_t r = 0; r < n_rem; ++r) {
-				const vec_t* col = reinterpret_cast<const vec_t*>(&weights_[row_off(rem[r]) + j]);
-				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_sub_16(regs[k], vec_load(&col[k]));
+				const RowType* col = &weights_[row_off(rem[r]) + j];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_sub_16(regs[k], vec_load_row(col + k * kChunk));
 			}
 			for (std::size_t r = 0; r < n_add; ++r) {
-				const vec_t* col = reinterpret_cast<const vec_t*>(&weights_[row_off(add[r]) + j]);
-				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_add_16(regs[k], vec_load(&col[k]));
+				const RowType* col = &weights_[row_off(add[r]) + j];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_add_16(regs[k], vec_load_row(col + k * kChunk));
 			}
 			vec_t* d = reinterpret_cast<vec_t*>(acc + j);
 			for (IndexType k = 0; k < kNumRegs; ++k) vec_store(&d[k], regs[k]);
@@ -364,11 +436,15 @@ class FeatureTransformer {
 		for (; j < width; j += kChunk) {
 			vec_t v = src ? vec_load(reinterpret_cast<const vec_t*>(src + j)) : vec_zero();
 			for (std::size_t r = 0; r < n_rem; ++r)
-				v = vec_sub_16(v, vec_load(reinterpret_cast<const vec_t*>(&weights_[row_off(rem[r]) + j])));
+				v = vec_sub_16(v, vec_load_row(&weights_[row_off(rem[r]) + j]));
 			for (std::size_t r = 0; r < n_add; ++r)
-				v = vec_add_16(v, vec_load(reinterpret_cast<const vec_t*>(&weights_[row_off(add[r]) + j])));
+				v = vec_add_16(v, vec_load_row(&weights_[row_off(add[r]) + j]));
 			vec_store(reinterpret_cast<vec_t*>(acc + j), v);
 		}
+#if defined(NNUE_FT_INT8_ROWS)
+		for (std::size_t r = 0; r < n_rem; ++r) fix_row<false>(acc, rem[r]);
+		for (std::size_t r = 0; r < n_add; ++r) fix_row<true>(acc, add[r]);
+#endif
 	}
 #endif
 
@@ -414,6 +490,13 @@ class FeatureTransformer {
 #if defined(ENABLE_ACC_CACHE)
 		++load_generation_;   // 重みが変わるので各スレッドの accumulator キャッシュを無効化する
 #endif
+#if defined(NNUE_FT_INT8_ROWS)
+		// int16 で読んで並び替えてから int8 へ落とす (一時領域 kWeightsCount × 2 B)
+		std::vector<WeightType> wtmp(kWeightsCount);
+		WeightType* const wdst = wtmp.data();
+#else
+		[[maybe_unused]] WeightType* const wdst = weights_;
+#endif
 #if defined(NNUE_FT_PAIRWISE)
 		// exp013 arm3 pairwise: trainer は SavedFormat::quantise::<i16> = raw little-endian を出力。
 		// SFNNwoPSQT の LEB128 形式とは異なるため、pairwise は標準 CReLU と同じ raw 読み出し。
@@ -424,9 +507,9 @@ class FeatureTransformer {
 		// nnue_eval.py --verify (意図クオンタイズ: raw weight, clamp254, >>9) で 1:1 一致を確認済み。
 		for (std::size_t i = 0; i < kHalfDimensions; ++i) biases_[i] = read_little_endian<BiasType>(stream);
 		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
-			weights_[i] = read_little_endian<WeightType>(stream);
+			wdst[i] = read_little_endian<WeightType>(stream);
 #if defined(VECTOR)
-		permute_weights(inverse_order_packs);
+		permute_weights(inverse_order_packs, wdst);
 #endif
 #elif defined(USE_ELEMENT_WISE_MULTIPLY)
 		read_leb_128<BiasType>(stream, biases_, kHalfDimensions);
@@ -438,10 +521,10 @@ class FeatureTransformer {
 			std::size_t violations = 0;
 			read_leb_128_sink<WeightType>(stream, std::size_t(kHalfDimensions) * kInputDimensions,
 				[&](std::size_t i, WeightType v) {
-					if (i < tail_count) { weights_[i] = v; return; }
+					if (i < tail_count) { wdst[i] = v; return; }
 					const std::size_t k = i - tail_count;
 					const std::size_t r = k / kHalfDimensions, c = k % kHalfDimensions;
-					WeightType* row = &weights_[tail_count + r * kNarrowWidth];
+					WeightType* row = &wdst[tail_count + r * kNarrowWidth];
 					const std::size_t lo0 = (kNarrowBlocks > 1 ? (r % kNarrowBlocks) : 0) * kNarrowCols;
 					const std::size_t lo1 = kHalfDimensions / 2 + lo0;
 					if (c >= lo0 && c < lo0 + kNarrowCols)
@@ -458,24 +541,70 @@ class FeatureTransformer {
 			}
 		}
 #else
-		read_leb_128<WeightType>(stream, weights_, kHalfDimensions * kInputDimensions);
+		read_leb_128<WeightType>(stream, wdst, kHalfDimensions * kInputDimensions);
 #endif
 
 #if defined(VECTOR)
-		permute_weights(inverse_order_packs);
+		permute_weights(inverse_order_packs, wdst);
 #endif
+#if defined(NNUE_FT_CLIP127_TEST)
+		// 検証用: int16 経路のまま |v| > 127 を clip して、NNUE_FT_INT8_ROWS ビルドと探索一致するかを見る (clip と算術の切り分け)
+		for (std::size_t i = 0; i < kWeightsCount; ++i)
+			wdst[i] = static_cast<WeightType>(wdst[i] > 127 ? 127 : (wdst[i] < -127 ? -127 : wdst[i]));
+#endif
+#if !defined(NNUE_FT_INT8_ROWS)
 		scale_weights(true);
+#endif
 #else
 		for (std::size_t i = 0; i < kHalfDimensions; ++i) biases_[i] = read_little_endian<BiasType>(stream);
 		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
-			weights_[i] = read_little_endian<WeightType>(stream);
+			wdst[i] = read_little_endian<WeightType>(stream);
 #endif
 #if defined(THREAT_ATTACKER_MAJOR)
 		// threat 行を attacker-major へロード時置換 (task#59 / report/51 §7.6.2)。
 		// RawFeatures = FeatureSet<Threat, HalfKP> なので threat の先頭行 = HalfKP::kDimensions。
 		if (!stream.fail())
-			Features::Threat::PermuteRows(weights_, kHalfDimensions,
+			Features::Threat::PermuteRows(wdst, kHalfDimensions,
 			                              Features::HalfKP<Features::Side::kFriend>::kDimensions);
+#endif
+#if defined(NNUE_FT_INT8_ROWS)
+		if (!stream.fail()) {
+			// nn.bin の値 (w×127) をそのまま int8 に。|v| > 127 は clip し、差分を残差表に (王者 tsfnn-526 で 6,900 / 357M = 0.002%)。
+			std::size_t clipped = 0;
+			for (std::size_t i = 0; i < kWeightsCount; ++i) {
+				const int v = wtmp[i];
+				const int c = v > 127 ? 127 : (v < -127 ? -127 : v);
+				clipped += std::size_t(c != v);
+				weights_[i] = static_cast<RowType>(c);
+			}
+			std::memset(fix_bits_, 0, sizeof(fix_bits_));
+			n_fix_rows_ = 0; n_fix_ = 0;
+			for (IndexType r = 0; r < kInputDimensions; ++r) {
+				const std::size_t base = row_off(r);
+#if defined(NNUE_THREAT_NARROW_COLS)
+				const IndexType width = r < kTailRows ? kHalfDimensions : kNarrowWidth;
+#else
+				const IndexType width = kHalfDimensions;
+#endif
+				bool any = false;
+				for (IndexType c = 0; c < width; ++c) {
+					const int v = wtmp[base + c];
+					if (v > 127 || v < -127) {
+						if (n_fix_ >= kMaxFix || n_fix_rows_ >= kMaxFixRows) {
+							std::fprintf(stderr, "Error! NNUE_FT_INT8_ROWS: residual table overflow (rows %u, entries %u)\n", n_fix_rows_, n_fix_);
+							return Tools::ResultCode::FileReadError;
+						}
+						if (!any) { fix_row_[n_fix_rows_] = r; fix_start_[n_fix_rows_] = n_fix_; ++n_fix_rows_; any = true; }
+						fix_[n_fix_++] = FixEntry{std::uint16_t(c), std::int16_t(v - (v > 127 ? 127 : -127))};
+					}
+				}
+				if (any) fix_bits_[r >> 6] |= std::uint64_t(1) << (r & 63);
+			}
+			fix_start_[n_fix_rows_] = n_fix_;
+			if (clipped)
+				std::fprintf(stderr, "NNUE_FT_INT8_ROWS: %llu of %llu weights beyond [-127, 127] -> int8 + residual table (%u rows)\n",
+				             (unsigned long long)clipped, (unsigned long long)kWeightsCount, n_fix_rows_);
+		}
 #endif
 		return !stream.fail() ? Tools::ResultCode::Ok : Tools::ResultCode::FileReadError;
 	}
@@ -483,8 +612,8 @@ class FeatureTransformer {
 	// Write network parameters
 	// パラメータを書き込む
 	bool WriteParameters(std::ostream& stream) const {
-#if defined(THREAT_ATTACKER_MAJOR) || defined(NNUE_THREAT_NARROW_COLS)
-		// 並び替え済み配置の保存は未対応 (標準 pair-major へ逆置換していないため、
+#if defined(THREAT_ATTACKER_MAJOR) || defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_INT8_ROWS)
+		// 並び替え済み配置 / int8 格納の保存は未対応 (標準 pair-major へ逆置換していないため、
 		// このまま書くと他ビルドで読めない nn.bin ができる)。学習系はこのビルドで使わないこと。
 		return false;
 #else
@@ -548,7 +677,7 @@ class FeatureTransformer {
 		constexpr IndexType NumOutputChunks = kHalfDimensions / 2 / OutputChunkSize;
 
 		vec_t Zero = vec_zero();
-		vec_t One = vec_set_16(127 * 2);
+		vec_t One = vec_set_16(kFtHalfScale ? 127 : 127 * 2);   // int8 行では acc が半スケール
 
 		const Color perspectives[2] = { pos.side_to_move(), ~pos.side_to_move() };
 		for (IndexType p = 0; p < 2; ++p) {
@@ -595,11 +724,12 @@ class FeatureTransformer {
 			};
 #endif
 
+			// int8 行 (kFtHalfScale): a', c' は従来の 1/2 なので (a'<<(s+1))·(c'<<1) >> 16 = (2a')(2c') >> (16−s) で従来と一致
 			constexpr int shift =
 #if defined(USE_SSE2)
-				7;
+				7 + kFtHalfScale;
 #else
-				6;
+				6 + kFtHalfScale;
 #endif
 
 			for (IndexType j = 0; j < NumOutputChunks; ++j)
@@ -608,8 +738,9 @@ class FeatureTransformer {
 					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 0), One), Zero), shift);
 				const vec_t sum0b =
 					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 1), One), Zero), shift);
-				const vec_t sum1a = vec_min_16(load1(j * 2 + 0), One);
-				const vec_t sum1b = vec_min_16(load1(j * 2 + 1), One);
+				vec_t sum1a = vec_min_16(load1(j * 2 + 0), One);
+				vec_t sum1b = vec_min_16(load1(j * 2 + 1), One);
+				if constexpr (kFtHalfScale) { sum1a = vec_slli_16(sum1a, 1); sum1b = vec_slli_16(sum1b, 1); }
 
 				const vec_t pa = vec_mulhi_16(sum0a, sum1a);
 				const vec_t pb = vec_mulhi_16(sum0b, sum1b);
@@ -641,9 +772,9 @@ class FeatureTransformer {
 					sum1 += accumulation[perspectives[p]][t][j + kHalfDimensions / 2];
 				}
 #endif
-				sum0 = std::clamp<BiasType>(sum0, 0, 127 * 2);
-				sum1 = std::clamp<BiasType>(sum1, 0, 127 * 2);
-				output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / 512);
+				sum0 = std::clamp<BiasType>(sum0, 0, kFtHalfScale ? 127 : 127 * 2);
+				sum1 = std::clamp<BiasType>(sum1, 0, kFtHalfScale ? 127 : 127 * 2);
+				output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / (kFtHalfScale ? 128 : 512));
 			}
 
 		}
@@ -867,7 +998,8 @@ class FeatureTransformer {
 #endif
 	}
 
-	void permute_weights([[maybe_unused]] void (*order_fn)(uint64_t*)) const {
+	// wts = 並び替える int16 の重み配列 (通常は weights_、NNUE_FT_INT8_ROWS ではロード時の int16 一時領域)
+	void permute_weights([[maybe_unused]] void (*order_fn)(uint64_t*), [[maybe_unused]] WeightType* wts) const {
 #if defined(USE_AVX2)
 #if defined(USE_AVX512)
 		constexpr IndexType di = 16;
@@ -882,22 +1014,21 @@ class FeatureTransformer {
 		// Tail 行は全幅、Head 行は 2N 幅。並び替えは 64 B (AVX2) / 128 B (AVX-512) の群内で閉じているので、
 		// スライス列 (群境界に揃う) を圧縮した行にも同じ群単位で適用できる。
 		for (IndexType j = 0; j < kTailRows; ++j) {
-			uint64_t* w = reinterpret_cast<uint64_t*>(const_cast<WeightType*>(&weights_[std::size_t(j) * kHalfDimensions]));
+			uint64_t* w = reinterpret_cast<uint64_t*>(&wts[std::size_t(j) * kHalfDimensions]);
 			for (IndexType i = 0; i < kHalfDimensions * sizeof(WeightType) / sizeof(uint64_t); i += di)
 				order_fn(&w[i]);
 		}
 		static_assert((kNarrowWidth * sizeof(WeightType) / sizeof(uint64_t)) % di == 0, "narrow row must be whole permute groups");
 		for (IndexType j = 0; j < kHeadRows; ++j) {
-			uint64_t* w = reinterpret_cast<uint64_t*>(const_cast<WeightType*>(
-				&weights_[std::size_t(kHalfDimensions) * kTailRows + std::size_t(j) * kNarrowWidth]));
+			uint64_t* w = reinterpret_cast<uint64_t*>(
+				&wts[std::size_t(kHalfDimensions) * kTailRows + std::size_t(j) * kNarrowWidth]);
 			for (IndexType i = 0; i < kNarrowWidth * sizeof(WeightType) / sizeof(uint64_t); i += di)
 				order_fn(&w[i]);
 		}
 #else
 		for (IndexType j = 0; j < kInputDimensions; ++j)
 		{
-			uint64_t* w =
-				reinterpret_cast<uint64_t*>(const_cast<WeightType*>(&weights_[j * kHalfDimensions]));
+			uint64_t* w = reinterpret_cast<uint64_t*>(&wts[std::size_t(j) * kHalfDimensions]);
 			for (IndexType i = 0; i < kHalfDimensions * sizeof(WeightType) / sizeof(uint64_t);
 					i += di)
 				order_fn(&w[i]);
@@ -906,6 +1037,7 @@ class FeatureTransformer {
 #endif
 	}
 
+#if !defined(NNUE_FT_INT8_ROWS)
 	inline void scale_weights(bool read) const {
 		// 全要素一様なので行構造 (narrow の Head 行含む) に依らず配列全体を走査する
 		WeightType* w = const_cast<WeightType*>(weights_);
@@ -916,6 +1048,7 @@ class FeatureTransformer {
 		for (IndexType i = 0; i < kHalfDimensions; ++i)
 			b[i] = read ? b[i] * 2 : b[i] / 2;
 	}
+#endif
 
 	// Calculate cumulative value without using difference calculation
 	// 差分計算を用いずに累積値を計算する
@@ -962,11 +1095,12 @@ class FeatureTransformer {
 #endif
 						const IndexType offset = row_off(index);
 						auto accumulation      = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
-						auto column            = reinterpret_cast<const vec_t*>(&weights_[offset]);
-						const IndexType kNumChunks = slot_width(i) / (sizeof(vec_t) / sizeof(BiasType));
+						const RowType* column  = &weights_[offset];
+						const IndexType kNumChunks = slot_width(i) / kVecElems;
 						for (IndexType j = 0; j < kNumChunks; ++j) {
-							accumulation[j] = vec_add_16(accumulation[j], column[j]);
+							accumulation[j] = vec_add_16(accumulation[j], vec_load_row(column + j * kVecElems));
 						}
+						fix_row<true>(&accumulator.accumulation[perspective][i][0], index);
 					}
 				}
 #if defined(ENABLE_FT_TRAFFIC_STAT)
@@ -1038,12 +1172,12 @@ class FeatureTransformer {
 				for (const auto index : removed_indices[pf_p]) {
 					const auto* row = reinterpret_cast<const char*>(&weights_[row_off(index)]);
 					_mm_prefetch(row, _MM_HINT_T0);
-					_mm_prefetch(row + row_width(i), _MM_HINT_T0);   // 行の中間 (bytes = dims*2/2)
+					_mm_prefetch(row + row_width(i) * sizeof(RowType) / 2, _MM_HINT_T0);   // 行の中間 (bytes = dims*2/2)
 				}
 				for (const auto index : added_indices[pf_p]) {
 					const auto* row = reinterpret_cast<const char*>(&weights_[row_off(index)]);
 					_mm_prefetch(row, _MM_HINT_T0);
-					_mm_prefetch(row + row_width(i), _MM_HINT_T0);
+					_mm_prefetch(row + row_width(i) * sizeof(RowType) / 2, _MM_HINT_T0);
 				}
 			}
 #endif
@@ -1094,10 +1228,11 @@ class FeatureTransformer {
 						const uint64_t t_row0 = __rdtsc();
 #endif
 #if defined(VECTOR)
-						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+						const RowType* column = &weights_[offset];
 						for (IndexType j = 0; j < kNumChunks; ++j) {
-							accumulation[j] = vec_sub_16(accumulation[j], column[j]);
+							accumulation[j] = vec_sub_16(accumulation[j], vec_load_row(column + j * kVecElems));
 						}
+						fix_row<false>(&accumulator.accumulation[perspective][i][0], index);
 #else
 						for (IndexType j = 0; j < slot_width(i); ++j) {
 							accumulator.accumulation[perspective][i][j] -= weights_[offset + j];
@@ -1124,10 +1259,11 @@ class FeatureTransformer {
 						const uint64_t t_row0 = __rdtsc();
 #endif
 #if defined(VECTOR)
-						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+						const RowType* column = &weights_[offset];
 						for (IndexType j = 0; j < kNumChunks; ++j) {
-							accumulation[j] = vec_add_16(accumulation[j], column[j]);
+							accumulation[j] = vec_add_16(accumulation[j], vec_load_row(column + j * kVecElems));
 						}
+						fix_row<true>(&accumulator.accumulation[perspective][i][0], index);
 #else
 						for (IndexType j = 0; j < slot_width(i); ++j) {
 							accumulator.accumulation[perspective][i][j] += weights_[offset + j];
@@ -1159,24 +1295,26 @@ class FeatureTransformer {
 	inline void add_row(BiasType* acc, IndexType index) const {
 		const IndexType offset = row_off(index);
 #if defined(VECTOR)
-		constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
+		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
 		auto a = reinterpret_cast<vec_t*>(acc);
-		auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
-		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_add_16(a[j], column[j]);
+		const RowType* column = &weights_[offset];
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_add_16(a[j], vec_load_row(column + j * kVecElems));
 #else
 		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] += weights_[offset + j];
 #endif
+		fix_row<true>(acc, index);
 	}
 	inline void sub_row(BiasType* acc, IndexType index) const {
 		const IndexType offset = row_off(index);
 #if defined(VECTOR)
-		constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
+		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
 		auto a = reinterpret_cast<vec_t*>(acc);
-		auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
-		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_sub_16(a[j], column[j]);
+		const RowType* column = &weights_[offset];
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_sub_16(a[j], vec_load_row(column + j * kVecElems));
 #else
 		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] -= weights_[offset + j];
 #endif
+		fix_row<false>(acc, index);
 	}
 
 	// active (未ソート、この視点の玉移動 slot の全 active index) から out を作る。
@@ -1259,7 +1397,8 @@ class FeatureTransformer {
 	// パラメータ
 	alignas(kCacheLineSize) BiasType biases_[kHalfDimensions];
 	// narrow (NNUE_THREAT_NARROW_COLS) では [Tail 行 × kHalf][Head 行 × kNarrowWidth] の連結 (row_off で引く)
-	alignas(kCacheLineSize) WeightType weights_[kWeightsCount];
+	// NNUE_FT_INT8_ROWS では int8 (nn.bin の値そのまま、半スケール)、通常は int16 (ロード時 ×2 済)
+	alignas(kCacheLineSize) RowType weights_[kWeightsCount];
 };
 
 } // namespace Eval::NNUE
