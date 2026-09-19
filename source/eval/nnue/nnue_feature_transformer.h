@@ -332,6 +332,13 @@ class FeatureTransformer {
 	}
 #endif
 
+	// task#87 (2026-09-19): この edition が使う特徴が「差分更新の前提 define (KEEP_LAST_MOVE / THREAT_EFFECT_DIFF) を欠いて
+	// 黙って毎手全再構築に落ちている」ならコンパイルエラーにする (09-08 の王者 ×0.64 事故の再発防止)。naive が要るなら
+	// -DTHREAT_NAIVE_REBUILD を明示する。
+	static_assert(!RawFeatures::kNaiveFallback,
+	              "a threat-family feature of this edition silently falls back to naive full rebuild: "
+	              "define KEEP_LAST_MOVE / THREAT_EFFECT_DIFF for this edition in config.h, or pass -DTHREAT_NAIVE_REBUILD explicitly");
+
 	// Number of input/output dimensions
 	// 入出力の次元数
 	static constexpr IndexType kInputDimensions  = RawFeatures::kDimensions;

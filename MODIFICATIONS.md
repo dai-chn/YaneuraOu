@@ -378,6 +378,18 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   ×1.046 / ×1.046、narrow128 との合成 (narrow128-tiled / tiled) ×1.252 / ×1.255 (直交)。
   **`prev_accumulator` の参照化だけで ×1.062 / ×1.063** (notiled ビルド vs 旧 exact2、§23.5) → このコミット全体で旧ビルド比 ×1.157、PGO 込み ×1.166。
 
+## threat 系特徴の「黙って naive に落ちる」を禁止 (2026-09-19, task#87)
+
+- `eval/nnue/features/threat.h` / `threat_lite.h` / `threat_effect.h`: 差分更新の前提 define (`KEEP_LAST_MOVE`、ThreatEffect は
+  `THREAT_EFFECT_DIFF`) が無いビルドは、従来 `kRefreshTrigger = kAnyPieceMoved` (毎手全再構築) へ黙ってフォールバックしていた。
+  edition 名の文字列一致 (config.h / Makefile の findstring) から漏れた王者 SFNN ビルドが数週間 ×0.64 の速度で判定を回した事故
+  (report/52 §18.11) の再発防止として、各特徴クラスが **`kNaiveFallback`** (前提 define を欠いて黙って落ちた = true、
+  `-DTHREAT_NAIVE_REBUILD` の明示なら false) を申告し、`features/feature_set.h` の `NaiveFallbackOf<T>` (無い特徴は false) と
+  `FeatureSet::kNaiveFallback` (OR 集約) を経て `nnue_feature_transformer.h` の `static_assert(!RawFeatures::kNaiveFallback)` で
+  **その特徴を実際に使う edition だけ**コンパイルエラーにする (threat 系ヘッダは全 edition でコンパイルされるので `#error` は使えない)。
+  ThreatKa2 は Threat を継承するので同じ扱い。既存 edition は config.h が define を導出しているのでビルドは変わらない
+  (王者 halfka2t / classic threat / threat-effect / plain SFNN の 4 edition でビルド確認、09-19)。
+
 ## FT 重みの int8 行 `NNUE_FT_INT8_ROWS` (2026-09-18〜19, task#82, report/52 §23.6、**採用: 王者 idle NPS ×1.076、ビット一致**)
 
 - `eval/nnue/nnue_feature_transformer.h`: FT 重みを nn.bin の値 (w×127) のまま `int8` で格納し (`RowType`)、従来のロード時 ×2

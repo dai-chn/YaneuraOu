@@ -49,10 +49,16 @@ class ThreatLite {
   static constexpr IndexType kMaxActiveDimensions = 320;
 
   // 差分更新 (task#59 ②)。threat.h と同じ条件でナイーブ全再構築へフォールバック
-#if defined(THREAT_NAIVE_REBUILD) || !defined(KEEP_LAST_MOVE)
+  // task#87: 黙って naive に落ちた状態は kNaiveFallback で申告し、使う edition で static_assert (threat.h と同じ)
+#if defined(THREAT_NAIVE_REBUILD)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
-#else
+  static constexpr bool kNaiveFallback = false;
+#elif defined(KEEP_LAST_MOVE)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
+  static constexpr bool kNaiveFallback = false;
+#else
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+  static constexpr bool kNaiveFallback = true;
 #endif
 
   // 特徴量のインデックスのリストを取得する (★重複 push あり = count 意味論)

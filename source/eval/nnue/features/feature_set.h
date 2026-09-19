@@ -10,6 +10,7 @@
 
 #include "features_common.h"
 #include <array>
+#include <type_traits>  // std::void_t (task#87 NaiveFallbackOf)
 
 namespace YaneuraOu {
 namespace Eval::NNUE::Features {
@@ -122,6 +123,14 @@ class FeatureSetBase {
   }
 };
 
+// task#87 (2026-09-19): 特徴クラスが「差分更新の前提 define を欠いて黙って naive に落ちている」ことを kNaiveFallback で
+// 申告する。無い特徴 (HalfKP 等) は false。FeatureSet が OR で集約し、nnue_feature_transformer.h の static_assert で
+// その特徴を実際に使う edition だけをコンパイルエラーにする (ヘッダ自体は全 edition でコンパイルされるので #error は使えない)。
+template <typename T, typename = void>
+struct NaiveFallbackOf { static constexpr bool value = false; };
+template <typename T>
+struct NaiveFallbackOf<T, std::void_t<decltype(T::kNaiveFallback)>> { static constexpr bool value = T::kNaiveFallback; };
+
 // Class template that represents the feature set
 // 特徴量セットを表すクラステンプレート
 // 実行時の計算量を線形にするために、内部の処理はテンプレート引数の逆順に行う
@@ -149,6 +158,8 @@ class FeatureSet<FirstFeatureType, RemainingFeatureTypes...> :
   using SortedTriggerSet = typename InsertToSet<TriggerEvent,
       typename Tail::SortedTriggerSet, Head::kRefreshTrigger>::Result;
   static constexpr auto kRefreshTriggers = SortedTriggerSet::kValues;
+  // task#87: いずれかの特徴が黙って naive に落ちているか
+  static constexpr bool kNaiveFallback = NaiveFallbackOf<Head>::value || Tail::kNaiveFallback;
 
   // 特徴量名を取得する
   static std::string GetName() {
@@ -220,6 +231,8 @@ class FeatureSet<FeatureType> : public FeatureSetBase<FeatureSet<FeatureType>> {
   using SortedTriggerSet =
       CompileTimeList<TriggerEvent, FeatureType::kRefreshTrigger>;
   static constexpr auto kRefreshTriggers = SortedTriggerSet::kValues;
+  // task#87
+  static constexpr bool kNaiveFallback = NaiveFallbackOf<FeatureType>::value;
 
   // 特徴量名を取得する
   static std::string GetName() {

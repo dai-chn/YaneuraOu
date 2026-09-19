@@ -55,9 +55,15 @@ class ThreatEffect {
 #if defined(THREAT_EFFECT_DIFF)
   // 差分更新: 玉が動いても reset しない (利き盤の差分だけで index の増減が決まる)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
-#else
-  // ナイーブ全再構築 (毎手 reset)
+  static constexpr bool kNaiveFallback = false;
+#elif defined(THREAT_NAIVE_REBUILD)
+  // ナイーブ全再構築 (毎手 reset)、明示指定
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+  static constexpr bool kNaiveFallback = false;
+#else
+  // task#87: 差分機構の define (config.h が edition から導出) が漏れたビルド = 黙って naive。使う edition では static_assert で止める
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+  static constexpr bool kNaiveFallback = true;
 #endif
 
   // 特徴量のインデックスのリストを取得する
