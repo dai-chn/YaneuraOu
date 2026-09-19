@@ -201,6 +201,14 @@ struct StateInfo {
 	Eval::NNUE::Accumulator accumulator;
 #endif
 
+#if defined(STATEINFO_DUMMY_PAD)
+	// task#85 の切り分け用 (研究ビルド限定): StateInfo を STATEINFO_DUMMY_PAD バイトだけ太らせる。
+	// 使われないので探索の意味論は不変、違いは「手数ぶんの StateInfo が L2 を圧迫する量」だけ。
+	// plain SFNN (accumulator 4 KB) にこれを 4 KB 足すと王者 (KA2 + threat の 2 slot = 8 KB) と同じ StateInfo サイズになるので、
+	// 探索側コストの増分 (report/52 §23.4: plain 2,107 → 王者 2,648 cycles/ノード) のうち StateInfo サイズ由来の分が測れる。
+	alignas(64) char dummy_pad_[STATEINFO_DUMMY_PAD];
+#endif
+
 #if defined (USE_EVAL_LIST)
 	// 評価値の差分計算の管理用
 	Eval::DirtyPiece dirtyPiece;

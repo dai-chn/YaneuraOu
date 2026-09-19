@@ -411,3 +411,11 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   残差 + 行ビット表 (43 KB) = ×1.013 (表がキャッシュから追い出され 1 update 630 cycles)、残差 + 番兵 (タイル後に判定) = ×1.065、
   **残差 + 番兵をタイル前に走査 = ×1.0771 / ×1.0751 (採用)**。メモリ footprint は王者 700 → 350 MB。`-DFT_ROW_PREFETCH` はタイル化の上では
   ×1.006 (n.s.) なので既定に入れない。classic 768 は負荷下 ×1.016 (n.s.、行数が少ない)。
+
+## StateInfo のダミーパッド `STATEINFO_DUMMY_PAD=N` (2026-09-19, task#85 の切り分け用、研究ビルド限定)
+
+- `source/position.h`: `-DSTATEINFO_DUMMY_PAD=N` で StateInfo に使われない `alignas(64) char dummy_pad_[N]` を足す。探索の意味論は不変
+  (探索一致で確認)、違いは「手数ぶんの StateInfo が L2 を圧迫する量」だけ。plain SFNN (accumulator 4 KB) に N=4096 を足すと王者
+  (KA2 + threat の 2 slot = 8 KB) と同じ StateInfo サイズになるので、探索側コストの増分 (report/52 §23.4) のうち StateInfo サイズ由来の
+  分を ftstat3 (elapsed − eval_sum) で測る。結果が大きければ SF 2024 の AccumulatorStack (accumulator を StateInfo から分離) に着手する。
+- 既定ビルドには影響なし。
