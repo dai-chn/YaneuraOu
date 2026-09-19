@@ -419,3 +419,14 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   (KA2 + threat の 2 slot = 8 KB) と同じ StateInfo サイズになるので、探索側コストの増分 (report/52 §23.4) のうち StateInfo サイズ由来の
   分を ftstat3 (elapsed − eval_sum) で測る。結果が大きければ SF 2024 の AccumulatorStack (accumulator を StateInfo から分離) に着手する。
 - 既定ビルドには影響なし。
+
+## threat 差分の視点写像 1 パス化 (2026-09-19, task#82, report/52 §23.3 c)
+
+- `source/eval/nnue/features/threat.cpp`: 差分更新の「駒対 → 特徴 index」の写像を、BLACK 視点の呼び出し時に両視点ぶん 1 パスで作り
+  (`pair_index_both`)、WHITE 視点の呼び出しは thread_local キャッシュ (`ThreatPieceDiff::idx_removed/idx_added`、threat_diff.h) からコピーする。
+  盤の点対称反転 (sq → 80 − sq、色反転) で空盤利きの raw 昇順が逆順になるので、WHITE 視点の ord は `cnt − 1 − ord` で出せ、
+  92 KB の `attack_order` を引き直さない。`Tables` に `attack_cnt` を追加し、コンストラクタでこの関係を全 (pat, from, to) で検算して
+  崩れていれば即死 (checksum と同様)。
+- 実測 (診断ビルド `-DTHREAT_DIFF_STATS` に `map_cycles/changed` を追加): 写像 162 cycles/視点呼び出し ≈ ノード時間の 4.6% → 半分を回収する見込み。
+- `-DTHREAT_NO_ONEPASS_MAP` で従来経路 (視点ごとに `pair_index`)。`-DTHREAT_DIFF_XCHECK` は両視点の index を旧 `pair_index` と毎対比較する。
+- 意味論は不変 (探索ビット一致で確認)。ThreatLite / ThreatEffect は自前の写像なので対象外。

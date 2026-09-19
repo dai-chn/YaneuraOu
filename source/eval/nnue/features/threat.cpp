@@ -142,6 +142,8 @@ struct Tables {
     std::array<uint32_t, kNumClasses> attacks_per_color{};
     // クラス累積 (attacker-major 配置の base 計算用)。class_cum[9] = 片側総数 6,020
     std::array<uint32_t, kNumClasses + 1> class_cum{};
+    // pattern, from -> 空盤利き数 (視点反転の ord' = cnt - 1 - ord に使う、2026-09-19)
+    std::array<std::array<uint8_t, 81>, kNumPatterns> attack_cnt{};
 
     Tables() {
         // attack_order は「攻撃しない組 = 0xFF」を先に敷いてから構築する
@@ -157,6 +159,7 @@ struct Tables {
                 int cnt = attacks_empty_board(tc, c, sq, tg);
                 for (int o = 0; o < cnt; ++o)
                     attack_order[pat][sq][tg[o]] = uint8_t(o);
+                attack_cnt[pat][sq] = uint8_t(cnt);
                 cum += cnt;
             }
             return cum;
@@ -206,6 +209,26 @@ struct Tables {
                          (unsigned long long)h);
             std::exit(1);
         }
+
+        // 視点反転の関係 (2026-09-19、pair_index_both の前提): 盤を点対称に反転 (sq -> 80 - sq、色反転) すると
+        // 空盤利きの raw 昇順が逆順になるので ord' = cnt - 1 - ord、cnt' = cnt。全 (pat, from, to) で検算し、
+        // 崩れていたら即死 (テーブルの走査順を変えたときの静かな不一致を防ぐ)。
+        for (int tc = 0; tc < kNumClasses; ++tc)
+            for (int c = 0; c < 2; ++c) {
+                const int pat  = attack_pattern_id(tc, Color(c));
+                const int pat2 = attack_pattern_id(tc, ~Color(c));
+                for (int f = 0; f < 81; ++f)
+                    for (int t = 0; t < 81; ++t) {
+                        const uint8_t o = attack_order[pat][f][t];
+                        if (o == 0xFF)
+                            continue;
+                        const int cnt = attack_cnt[pat][f];
+                        if (attack_cnt[pat2][80 - f] != cnt || attack_order[pat2][80 - f][80 - t] != uint8_t(cnt - 1 - o)) {
+                            std::fprintf(stderr, "FATAL: Threat tables are not point-symmetric (pat %d from %d to %d)\n", pat, f, t);
+                            std::exit(1);
+                        }
+                    }
+            }
     }
 };
 
@@ -236,6 +259,29 @@ inline uint32_t pair_index(const Tables& T, Color perspective,
             + T.from_offset[pat][from_n] + ord) * 18u + uint32_t(ds * 9 + dc);
 #else
     return T.pair_base[as * 162 + ac * 18 + ds * 9 + dc] + T.from_offset[pat][from_n] + ord;
+#endif
+}
+
+// (attacker, victim) 対 -> BLACK / WHITE 両視点の index を 1 パスで (2026-09-19、task#82、report/52 §23.3 c)。
+// WHITE 視点は盤の点対称反転 (from/to は Inv、色は反転) なので、attack_order を引き直さずに
+// ord_w = cnt - 1 - ord_b で出せる (Tables のコンストラクタで全数検算)。差分更新の写像コストの半分 (2 度目の 92 KB 表引き) が消える。
+inline void pair_index_both(const Tables& T, Color attacker_color, int ac, Square from,
+                            Color target_color, int dc, Square to, uint32_t& idx_b, uint32_t& idx_w) {
+    const int pat_b = attack_pattern_id(ac, attacker_color);
+    const uint8_t ord_b = T.attack_order[pat_b][from][to];
+    ASSERT_LV3(ord_b != 0xFF);
+    const int as_b = (attacker_color != BLACK) ? 1 : 0;
+    const int ds_b = (target_color != BLACK) ? 1 : 0;
+    const int pat_w = attack_pattern_id(ac, ~attacker_color);
+    const Square from_w = Inv(from);
+    const uint32_t ord_w = uint32_t(T.attack_cnt[pat_b][from]) - 1u - ord_b;
+    const int as_w = as_b ^ 1, ds_w = ds_b ^ 1;
+#if defined(THREAT_ATTACKER_MAJOR)
+    idx_b = (T.class_cum[kNumClasses] * uint32_t(as_b) + T.class_cum[ac] + T.from_offset[pat_b][from] + ord_b) * 18u + uint32_t(ds_b * 9 + dc);
+    idx_w = (T.class_cum[kNumClasses] * uint32_t(as_w) + T.class_cum[ac] + T.from_offset[pat_w][from_w] + ord_w) * 18u + uint32_t(ds_w * 9 + dc);
+#else
+    idx_b = T.pair_base[as_b * 162 + ac * 18 + ds_b * 9 + dc] + T.from_offset[pat_b][from] + ord_b;
+    idx_w = T.pair_base[as_w * 162 + ac * 18 + ds_w * 9 + dc] + T.from_offset[pat_w][from_w] + ord_w;
 #endif
 }
 
@@ -287,18 +333,20 @@ void Threat::PermuteRows(std::int16_t* weights, std::size_t half_dims, std::size
 #include <x86intrin.h>
 namespace {
 std::atomic<uint64_t> g_refresh_calls{0}, g_changed_calls{0}, g_changed_rows{0},
-    g_prev_pairs{0}, g_now_pairs{0}, g_collect_calls{0}, g_collect_cycles_set{0}, g_collect_cycles_exact{0};
+    g_prev_pairs{0}, g_now_pairs{0}, g_collect_calls{0}, g_collect_cycles_set{0}, g_collect_cycles_exact{0},
+    g_map_cycles{0};   // 2026-09-19: 駒対 → 視点 index の写像ループ (AppendChangedIndices 1 回 = 1 視点ぶん) のサイクル (report/52 §23.3 c)
 struct StatsPrinter {
     ~StatsPrinter() {
         std::fprintf(stderr,
             "[threat-diff-stats] refresh=%llu changed=%llu rows/changed=%.2f prev+now_pairs/changed=%.2f"
-            " collect=%llu cycles/collect set=%.0f exact=%.0f\n",
+            " collect=%llu cycles/collect set=%.0f exact=%.0f map_cycles/changed=%.0f\n",
             (unsigned long long)g_refresh_calls.load(), (unsigned long long)g_changed_calls.load(),
             g_changed_calls ? double(g_changed_rows) / double(g_changed_calls) : 0.0,
             g_changed_calls ? double(g_prev_pairs + g_now_pairs) / double(g_changed_calls) : 0.0,
             (unsigned long long)g_collect_calls.load(),
             g_collect_calls ? double(g_collect_cycles_set) / double(g_collect_calls) : 0.0,
-            g_collect_calls ? double(g_collect_cycles_exact) / double(g_collect_calls) : 0.0);
+            g_collect_calls ? double(g_collect_cycles_exact) / double(g_collect_calls) : 0.0,
+            g_changed_calls ? double(g_map_cycles) / double(g_changed_calls) : 0.0);
     }
 } g_stats_printer;
 }
@@ -378,7 +426,7 @@ static void xcheck_piece_diff(const Position& pos, const ThreatDiffCache& A, con
 // 直前手による駒レベル threat 差分 (視点非依存)。BLACK 呼び出しで計算し、
 // 直後の WHITE 呼び出しはキャッシュヒットで再利用。StateInfo のアドレスは
 // 使い回されるので (key, lastMove) も照合する。
-const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
+static ThreatDiffCache& threat_piece_diff_mut(const Position& pos) {
     const StateInfo* st = pos.state();
     const Move m = st->lastMove;
     // dirty_num == 0 (null move) は feature_set 側で弾かれるのでここには来ない
@@ -391,6 +439,7 @@ const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
         C.key = (uint64_t)st->key();
         C.move = m.to_u32();
         C.n_removed = C.n_added = 0;
+        C.mapped = false;
 #if defined(THREAT_DIFF_XCHECK)
         ThreatDiffCache& D = t_diff_cache2;
         D.n_removed = D.n_added = 0;
@@ -418,12 +467,18 @@ const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
     return C;
 }
 
+const ThreatPieceDiff& threat_piece_diff(const Position& pos) {
+    return threat_piece_diff_mut(pos);
+}
+
 void Threat::AppendChangedIndices(const Position& pos, Color perspective,
                                   IndexList* removed, IndexList* added) {
     THREAT_STAT(g_changed_calls.fetch_add(1, std::memory_order_relaxed);)
     const Tables& T = tables();
-    const ThreatPieceDiff& C = threat_piece_diff(pos);
-    // ---- 駒レベル差分 -> この視点の index ----
+    ThreatDiffCache& C = threat_piece_diff_mut(pos);
+    THREAT_STAT(const uint64_t t_map0 = __rdtsc();)
+#if defined(THREAT_NO_ONEPASS_MAP)
+    // 旧経路 (視点ごとに pair_index): A/B 用
     for (int i = 0; i < C.n_removed; ++i) {
         const ThreatPair& pr = C.removed[i];
         const Piece apc = Piece(pr.attacker_pc);
@@ -440,7 +495,43 @@ void Threat::AppendChangedIndices(const Position& pos, Color perspective,
             color_of(apc), threat_class_of(type_of(apc)), Square(pr.attacker_sq),
             color_of(vpc), threat_class_of(type_of(vpc)), Square(pr.victim_sq))));
     }
-    THREAT_STAT(g_changed_rows.fetch_add(C.n_removed + C.n_added, std::memory_order_relaxed);)
+#else
+    // ---- 駒レベル差分 -> 両視点の index を 1 パスで (最初の視点の呼び出しで作り、もう一方はコピー) ----
+    if (!C.mapped) {
+        auto map_all = [&](const ThreatPair* prs, int n, uint32_t (&out)[2][128]) {
+            for (int i = 0; i < n; ++i) {
+                const ThreatPair& pr = prs[i];
+                const Piece apc = Piece(pr.attacker_pc);
+                const Piece vpc = Piece(pr.victim_pc);
+                pair_index_both(T, color_of(apc), threat_class_of(type_of(apc)), Square(pr.attacker_sq),
+                                color_of(vpc), threat_class_of(type_of(vpc)), Square(pr.victim_sq),
+                                out[BLACK][i], out[WHITE][i]);
+#if defined(THREAT_DIFF_XCHECK)
+                // 研究ビルド: 旧 pair_index と両視点で一致することを毎対検査
+                for (Color p : COLOR) {
+                    const uint32_t ref = pair_index(T, p, color_of(apc), threat_class_of(type_of(apc)), Square(pr.attacker_sq),
+                                                    color_of(vpc), threat_class_of(type_of(vpc)), Square(pr.victim_sq));
+                    if (ref != out[p][i]) {
+                        std::fprintf(stderr, "FATAL: pair_index_both mismatch (perspective %d): %u vs %u\n", int(p), ref, out[p][i]);
+                        std::exit(1);
+                    }
+                }
+#endif
+            }
+        };
+        map_all(C.removed, C.n_removed, C.idx_removed);
+        map_all(C.added, C.n_added, C.idx_added);
+        C.mapped = true;
+    }
+    const uint32_t* r = C.idx_removed[perspective];
+    for (int i = 0; i < C.n_removed; ++i)
+        removed->push_back(IndexType(r[i]));
+    const uint32_t* a = C.idx_added[perspective];
+    for (int i = 0; i < C.n_added; ++i)
+        added->push_back(IndexType(a[i]));
+#endif
+    THREAT_STAT(g_map_cycles.fetch_add(__rdtsc() - t_map0, std::memory_order_relaxed);
+                g_changed_rows.fetch_add(C.n_removed + C.n_added, std::memory_order_relaxed);)
 }
 
 // 駒レベルの threat 差分を C.removed/C.added に収集する (視点非依存の 1 回だけの仕事)。set 版。

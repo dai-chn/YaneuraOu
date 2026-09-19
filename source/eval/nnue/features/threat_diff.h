@@ -37,6 +37,11 @@ struct ThreatPieceDiff {
     int n_removed = 0, n_added = 0;
     ThreatPiecePair removed[128];
     ThreatPiecePair added[128];
+    // 2026-09-19 (task#82、report/52 §23.3 c): Threat (full) の両視点 index を BLACK 呼び出し時に 1 パスで作り、
+    // WHITE 呼び出しはここからコピーする。mapped=false のとき無効 (収集し直したら false に戻す)。ThreatLite は使わない。
+    bool mapped = false;
+    std::uint32_t idx_removed[2][128];   // [perspective][i]
+    std::uint32_t idx_added[2][128];
 };
 
 // pos の直前手による差分を返す (キャッシュミス時は収集する)。実装は threat.cpp。
