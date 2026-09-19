@@ -427,6 +427,6 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   盤の点対称反転 (sq → 80 − sq、色反転) で空盤利きの raw 昇順が逆順になるので、WHITE 視点の ord は `cnt − 1 − ord` で出せ、
   92 KB の `attack_order` を引き直さない。`Tables` に `attack_cnt` を追加し、コンストラクタでこの関係を全 (pat, from, to) で検算して
   崩れていれば即死 (checksum と同様)。
-- 実測 (診断ビルド `-DTHREAT_DIFF_STATS` に `map_cycles/changed` を追加): 写像 162 cycles/視点呼び出し ≈ ノード時間の 4.6% → 半分を回収する見込み。
+- 実測 (診断ビルド `-DTHREAT_DIFF_STATS` に `map_cycles/changed` を追加、ABAB 各 2 回): 写像 旧 167/160 → 新 134/132 cycles/視点呼び出し (−20%、≈ ノード時間の 0.9%)。attack_order が L1/L2 に乗っていて 2 度目の表引きは安かった。ビット一致で害は無いので採用。
 - `-DTHREAT_NO_ONEPASS_MAP` で従来経路 (視点ごとに `pair_index`)。`-DTHREAT_DIFF_XCHECK` は両視点の index を旧 `pair_index` と毎対比較する。
 - 意味論は不変 (探索ビット一致で確認)。ThreatLite / ThreatEffect は自前の写像なので対象外。
