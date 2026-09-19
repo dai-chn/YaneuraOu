@@ -167,6 +167,7 @@ LOCAL_SRC_FILES := \
   ../source/movegen.cpp                                                \
   ../source/position.cpp                                               \
   ../source/usi.cpp                                                    \
+  ../source/learn/filter_quiet.cpp                                     \
   ../source/usioption.cpp                                              \
   ../source/thread.cpp                                                 \
   ../source/tt.cpp                                                     \
@@ -180,6 +181,7 @@ LOCAL_SRC_FILES := \
   ../source/tune.cpp                                                   \
   ../source/book/apery_book.cpp                                        \
   ../source/book/book.cpp                                              \
+  ../source/book/policybook.cpp                                        \
   ../source/extra/bitop.cpp                                            \
   ../source/extra/long_effect.cpp                                      \
   ../source/extra/sfen_packer.cpp                                      \
@@ -196,7 +198,6 @@ LOCAL_SRC_FILES := \
   ../source/testcmd/normal_test_cmd.cpp                                \
   ../source/testcmd/unit_test.cpp                                      \
   ../source/book/makebook.cpp                                          \
-  ../source/book/makebook2015.cpp                                      \
   ../source/book/makebook2025.cpp
 
 

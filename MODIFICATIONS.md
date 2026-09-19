@@ -430,3 +430,15 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 実測 (診断ビルド `-DTHREAT_DIFF_STATS` に `map_cycles/changed` を追加、ABAB 各 2 回): 写像 旧 167/160 → 新 134/132 cycles/視点呼び出し (−20%、≈ ノード時間の 0.9%)。attack_order が L1/L2 に乗っていて 2 度目の表引きは安かった。ビット一致で害は無いので採用。
 - `-DTHREAT_NO_ONEPASS_MAP` で従来経路 (視点ごとに `pair_index`)。`-DTHREAT_DIFF_XCHECK` は両視点の index を旧 `pair_index` と毎対比較する。
 - 意味論は不変 (探索ビット一致で確認)。ThreatLite / ThreatEffect は自前の写像なので対象外。
+
+## jni/Android.mk のソースリスト修正 (2026-09-19, kisou Android 版 M2)
+
+- `../source/learn/filter_quiet.cpp` を追加。`usi.cpp` の `filter_quiet` コマンド (exp009、`USE_SFEN_PACKER` は通常ビルドで常時 ON) が
+  `Learner::filter_quiet_cmd` を参照するため、Android では undefined symbol になっていた。`.cpp` 自身が `USE_SFEN_PACKER` でガードしており、
+  `source/Makefile` も無条件で持っているので、Android.mk も無条件で追加する。
+- `../source/book/makebook2015.cpp` を削除、`../source/book/policybook.cpp` を追加。定跡サブシステムの upstream 移植 (54eeb953、task#81) で
+  前者は削除・後者は追加され `source/Makefile` は更新されたが、`jni/Android.mk` が取り残されて `No rule to make target` で止まっていた。
+- 検証: NDK 29.0.14206865 / `APP_ABI=x86_64 APP_PLATFORM=android-24 YANEURAOU_EDITION=YANEURAOU_ENGINE_NNUE`
+  `EXTRA_CPPFLAGS="-DYANEURAOU_ENGINE_NNUE_HALFKP_768X2_16_32 -DEVAL_NNUE_HALFKP_768X2_16_32 -DNNUE_L1_SCALE_BITS=7"` でリンクまで完走。
+  `evaluate_nnue.o.d` の依存に `architectures/halfkp_768x2-16-32.h` を確認。
+- ★Android.mk は `source/Makefile` と別管理なので、ソースの増減時は両方を直すこと (バリアント台帳: shogi-nnue リポジトリの docs/engine-variants.md)。
