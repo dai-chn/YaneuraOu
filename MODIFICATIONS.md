@@ -442,3 +442,19 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `EXTRA_CPPFLAGS="-DYANEURAOU_ENGINE_NNUE_HALFKP_768X2_16_32 -DEVAL_NNUE_HALFKP_768X2_16_32 -DNNUE_L1_SCALE_BITS=7"` でリンクまで完走。
   `evaluate_nnue.o.d` の依存に `architectures/halfkp_768x2-16-32.h` を確認。
 - ★Android.mk は `source/Makefile` と別管理なので、ソースの増減時は両方を直すこと (バリアント台帳: shogi-nnue リポジトリの docs/engine-variants.md)。
+
+## ブロック疎 FT 行 `NNUE_FT_BLOCK_ROWS=B` — 行の足跡を据え置いて accumulator の幅を B 倍にする (2026-09-21, task#92, 研究ビルド)
+
+- `source/eval/nnue/nnue_feature_transformer.h`: threat 専用スライス (`NNUE_THREAT_NARROW_COLS`) の圧縮格納機構を**全行** (KA2 + threat) に
+  拡張する新 define。accumulator の幅 kHalf は edition 名 (`…_halfka2t_2048-7-64-ls9` 等) で決め、各 FT 行は 2N = kHalf/B 値だけ持ち
+  (行の更新バイトと FT 重みのメモリは 1024 幅と同じ)、行 r はブロック b(r) = (r mod 1629) mod B の列 [b·N, b·N+N) と
+  [kHalf/2 + b·N, …) にだけ加減算される。1629 = HalfKA2 の piece-square 数で、同じ piece-square の 81 行と factoriser の仮想行が
+  同じブロックに落ちる (BulletOu 側の fold と整合)。
+- 実装は narrow の定数群を `kNarrowRowBegin` (narrow: Tail 行数 / block rows: 0) と `compact_row(index)` / `narrow_slot(slot)` で一般化した。
+  ロード時に足跡の外の非零を数えて 0 でなければ読込失敗 (この構造で訓練したネット以外を黙って読まない)。
+  `apply_rows_tiled` はブロック行版 (行をブロック別に分け、タイルのブロックの行だけを行内オフセットから読む) を持ち、
+  タイル化の利得 (accumulator 全幅を 1 回ずつ読み書き) を保つ。acc cache の `add_row/sub_row` は `apply_narrow_row` へ。
+- `NNUE_THREAT_NARROW_COLS` との同時指定はコンパイルエラー。`WriteParameters` は未対応 (false)。構造文字列に `[block-rows B=…]` を付ける。
+- 意味論の検証: 同じブロック構造 (足跡外 = 0) の合成ネットを密 W' ビルドとブロック W' ビルドで読み、探索一致で確認する
+  (`tools/search_parity.py`)。NPS 計測は report/52 §21.14〜。
+- 既定ビルドには影響なし (define を付けなければ従来どおり)。

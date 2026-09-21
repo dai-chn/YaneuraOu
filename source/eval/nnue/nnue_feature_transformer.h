@@ -276,8 +276,8 @@ class FeatureTransformer {
 	std::uint32_t n_fix_rows_ = 0, n_fix_ = 0;
 	// 行内の格納位置 col → その行が足される accumulator 上の位置
 	inline IndexType fix_acc_pos(IndexType index, IndexType col) const {
-#if defined(NNUE_THREAT_NARROW_COLS)
-		if (kNarrowBlocks > 1 && index >= kTailRows) {
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+		if (narrow_blocked() && compact_row(index)) {
 			const IndexType b = narrow_block(index);
 			return col < kNarrowCols ? b * kNarrowCols + col : kHalfDimensions / 2 + b * kNarrowCols + (col - kNarrowCols);
 		}
@@ -352,27 +352,60 @@ class FeatureTransformer {
 	// 順伝播用バッファのサイズ
 	static constexpr std::size_t kBufferSize = kOutputDimensions * sizeof(OutputType);
 
-#if defined(NNUE_THREAT_NARROW_COLS)
+#if defined(NNUE_THREAT_NARROW_COLS) && defined(NNUE_FT_BLOCK_ROWS)
+#error "NNUE_THREAT_NARROW_COLS and NNUE_FT_BLOCK_ROWS are mutually exclusive"
+#endif
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
 	// ★threat 専用スライス (2026-09-18、report/52 §21.1): Head 特徴 (threat、kRefreshTriggers[0] == kNone の slot) の行を
 	//   pairwise 前半 [0,N) と後半 [kHalf/2, kHalf/2+N) の 2N 列だけ持つ (行 2N×2 B、行列 kHeadRows×2N×2 B)。
 	//   列マスクで訓練した nn.bin (マスク外 = 0) 専用で、ロード時にマスク外が 0 であることを検査して違反なら読込失敗にする。
 	//   accumulator の narrow slot は先頭 2N 要素だけ使い、Transform では full slot の先頭 N 列 (各半分) にだけ足す。
 	//   バイアスは full slot (KA2) に置く。評価は全幅ビルドとビット一致 (マスク外が 0 なので和が同じ)。
-	static constexpr IndexType kNarrowCols  = NNUE_THREAT_NARROW_COLS;
+	// ★ブロック疎で幅を増やす (2026-09-21、task#92、spec docs/superpowers/specs/2026-09-21-block-sparse-wide-ft-design.md、
+	//   NNUE_FT_BLOCK_ROWS=B): 同じ圧縮格納を**全行** (KA2 + threat) に適用する。accumulator の幅 kHalf は edition 名
+	//   (…_2048-7-64-ls9) で B 倍にし、行 1 本は 2N = kHalf/B 値のまま = 行の更新バイトと FT 重みのメモリは 1024 幅と同じ。
+	//   行 r のブロック b(r) = (r mod 1629) mod B (1629 = HalfKA2 の piece-square 数: 同じ piece-square の 81 行と factoriser の
+	//   仮想行が同じブロックに落ちる)。両 slot とも行がブロック位置に散るので slot は全幅、Transform は通常の全 slot 合算。
+	//   BulletOu 側 (compact l0w、--ft-block-rows) と規則が一致していること。
+#if defined(NNUE_FT_BLOCK_ROWS)
+	static constexpr IndexType kNarrowBlocks   = NNUE_FT_BLOCK_ROWS;
+	static constexpr IndexType kNarrowCols     = kHalfDimensions / (2 * kNarrowBlocks);
+	static constexpr IndexType kNarrowRowBegin = 0;                       // 全行が圧縮行
+	static constexpr IndexType kPieceInputs    = 1629;                    // HalfKA2 の piece-square 数 (index = king_sq * 1629 + ps)
+	static_assert(kNarrowBlocks >= 2, "NNUE_FT_BLOCK_ROWS must be >= 2 (1 is the plain dense build)");
+	static_assert(kHalfDimensions % (2 * kNarrowBlocks) == 0 && kNarrowCols % 32 == 0, "kHalf / (2B) must be a multiple of 32");
+	static_assert(RawFeatures::kTailDimensions == 81 * kPieceInputs, "NNUE_FT_BLOCK_ROWS assumes HalfKA2 (81 x 1629) as the Tail feature");
+#else
+	static constexpr IndexType kNarrowCols     = NNUE_THREAT_NARROW_COLS;
+	static constexpr IndexType kNarrowRowBegin = RawFeatures::kTailDimensions;   // Head (threat) 行だけが圧縮行
+	static_assert(kNarrowCols % 32 == 0 && kNarrowCols * 2 <= kHalfDimensions, "narrow cols must be a multiple of 32");
+#endif
 	static constexpr IndexType kNarrowWidth = 2 * kNarrowCols;
 	static constexpr IndexType kNarrowSlot  = 0;
 	static constexpr IndexType kBiasSlot    = 1;
 	static constexpr IndexType kTailRows    = RawFeatures::kTailDimensions;
 	static constexpr IndexType kHeadRows    = kInputDimensions - kTailRows;
+	static constexpr IndexType kNarrowRows  = kInputDimensions - kNarrowRowBegin;   // 圧縮行の本数
 	static constexpr std::size_t kWeightsCount =
-		std::size_t(kHalfDimensions) * kTailRows + std::size_t(kNarrowWidth) * kHeadRows;
+		std::size_t(kHalfDimensions) * kNarrowRowBegin + std::size_t(kNarrowWidth) * kNarrowRows;
 	static_assert(kRefreshTriggers.size() == 2 && kRefreshTriggers[0] == Features::TriggerEvent::kNone,
-	              "NNUE_THREAT_NARROW_COLS needs FeatureSet<Threat (kNone), Base (kFriendKingMoved)>");
-	static_assert(kNarrowCols % 32 == 0 && kNarrowCols * 2 <= kHalfDimensions, "narrow cols must be a multiple of 32");
+	              "compact FT rows need FeatureSet<Threat (kNone), Base (kFriendKingMoved)>");
 	static_assert(kHeadRows > 0, "no Head feature");
+	// この行は圧縮行か (narrow: Head 行のみ / block rows: 全行)
+	static constexpr bool compact_row(IndexType index) { return index >= kNarrowRowBegin; }
 	// ブロック疎 (report/52 §21.5、NNUE_THREAT_NARROW_BLOCKS=B > 1): threat 行 t はブロック b = t % B を持ち、その 2N 値を
 	// full 幅 accumulator の列 [b*N, b*N+N) と [kHalf/2 + b*N, ...) に足す。行の格納は B=1 と同じ 2N 幅。narrow slot は full 幅になり、
 	// Transform は通常の全 slot 合算 (B=1 のときだけ先頭 N 列の短縮経路)。
+#if defined(NNUE_FT_BLOCK_ROWS)
+	static constexpr bool narrow_blocked() { return true; }
+	// 行 r のブロック = (r mod 1629) mod B (spec §規則)。KA2 行も threat 行も同じ式 (threat 行では単なる決定的な散らし)。
+	static constexpr IndexType narrow_block(IndexType index) { return (index % kPieceInputs) % kNarrowBlocks; }
+	// 両 slot とも行がブロック位置に散るので slot は全幅、格納行は常に 2N
+	static constexpr IndexType slot_width(IndexType /*slot*/) { return kHalfDimensions; }
+	static constexpr IndexType row_width(IndexType /*slot*/) { return kNarrowWidth; }
+	// この slot の行は圧縮行か (block rows: 全 slot)
+	static constexpr bool narrow_slot(IndexType /*slot*/) { return true; }
+#else
 #if !defined(NNUE_THREAT_NARROW_BLOCKS)
 #define NNUE_THREAT_NARROW_BLOCKS 1
 #endif
@@ -383,6 +416,8 @@ class FeatureTransformer {
 	// accumulator 上の slot 幅 (B>1 の narrow slot は full 幅) と、格納行の幅 (narrow 行は常に 2N)
 	static constexpr IndexType slot_width(IndexType slot) { return (slot == kNarrowSlot && kNarrowBlocks == 1) ? kNarrowWidth : kHalfDimensions; }
 	static constexpr IndexType row_width(IndexType slot) { return slot == kNarrowSlot ? kNarrowWidth : kHalfDimensions; }
+	static constexpr bool narrow_slot(IndexType slot) { return slot == kNarrowSlot; }
+#endif
 	// B>1 用: narrow 行 (2N 値) を full 幅 accumulator のブロック位置に足す (kAdd) / 引く
 	template <bool kAdd>
 	inline void apply_narrow_row(BiasType* acc, IndexType index) const {
@@ -413,8 +448,11 @@ class FeatureTransformer {
 	static constexpr IndexType row_width(IndexType /*slot*/) { return kHalfDimensions; }
 #endif
 
-	// タイル更新 (NNUE_FT_TILED) の対象 slot か: B>1 の narrow slot は行がブロック位置に散るので従来経路 (apply_narrow_row)
-#if defined(NNUE_THREAT_NARROW_COLS)
+	// タイル更新 (NNUE_FT_TILED) の対象 slot か: B>1 の narrow slot は行がブロック位置に散るので従来経路 (apply_narrow_row)。
+	// block rows は apply_rows_tiled 自体がブロック対応 (下) なので全 slot をタイルで更新する。
+#if defined(NNUE_FT_BLOCK_ROWS)
+	static constexpr bool tiled_slot(IndexType /*slot*/) { return true; }
+#elif defined(NNUE_THREAT_NARROW_COLS)
 	static constexpr bool tiled_slot(IndexType slot) { return !(narrow_blocked() && slot == kNarrowSlot); }
 #else
 	static constexpr bool tiled_slot(IndexType /*slot*/) { return true; }
@@ -437,6 +475,41 @@ class FeatureTransformer {
 		for (std::size_t r = 0; r < n_rem; ++r) if (__builtin_expect(weights_[row_off(rem[r])] == kFixSentinel, 0)) frem[nfr++] = rem[r];
 		for (std::size_t r = 0; r < n_add; ++r) if (__builtin_expect(weights_[row_off(add[r])] == kFixSentinel, 0)) fadd[nfa++] = add[r];
 #endif
+#if defined(NNUE_FT_BLOCK_ROWS)
+		// ★ブロック行版 (task#92): 行 r (格納 2N 値) は accumulator の [b·N, b·N+N) と [kHalf/2 + b·N, +N) にだけ効く。
+		//   タイルはブロック半分の中に収まる (N % kTile == 0) ので、タイル j のブロック b を求め、そのブロックの行だけを
+		//   行内オフセット half·N + (j − b·N) から読む。行を先にブロック別に分けておく (タイルごとの走査を避ける)。
+		//   accumulator 全幅を 1 回ずつ読み書きする点は密版と同じ = タイル化の利得 (行読み 1 × 幅) を保つ。
+		static_assert(kNarrowCols % kTile == 0 && kHalfDimensions % kTile == 0, "block rows: N and kHalf must be whole register tiles");
+		IndexType remb[kNarrowBlocks][RawFeatures::kMaxActiveDimensions], addb[kNarrowBlocks][RawFeatures::kMaxActiveDimensions];
+		std::size_t nrb[kNarrowBlocks] = {}, nab[kNarrowBlocks] = {};
+		for (std::size_t r = 0; r < n_rem; ++r) { const IndexType b = narrow_block(rem[r]); remb[b][nrb[b]++] = rem[r]; }
+		for (std::size_t r = 0; r < n_add; ++r) { const IndexType b = narrow_block(add[r]); addb[b][nab[b]++] = add[r]; }
+		constexpr IndexType kHalfW = kHalfDimensions / 2;
+		for (IndexType j = 0; j < width; j += kTile) {
+			const IndexType half = j >= kHalfW ? 1 : 0;
+			const IndexType jj   = j - half * kHalfW;
+			const IndexType b    = jj / kNarrowCols;
+			const IndexType off  = half * kNarrowCols + (jj - b * kNarrowCols);   // 行内の読み出し位置
+			vec_t regs[kNumRegs];
+			if (src) {
+				const vec_t* s = reinterpret_cast<const vec_t*>(src + j);
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_load(&s[k]);
+			} else {
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_zero();
+			}
+			for (std::size_t r = 0; r < nrb[b]; ++r) {
+				const RowType* col = &weights_[row_off(remb[b][r]) + off];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_sub_16(regs[k], vec_load_row(col + k * kChunk));
+			}
+			for (std::size_t r = 0; r < nab[b]; ++r) {
+				const RowType* col = &weights_[row_off(addb[b][r]) + off];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_add_16(regs[k], vec_load_row(col + k * kChunk));
+			}
+			vec_t* d = reinterpret_cast<vec_t*>(acc + j);
+			for (IndexType k = 0; k < kNumRegs; ++k) vec_store(&d[k], regs[k]);
+		}
+#else
 		IndexType j = 0;
 		for (; j + kTile <= width; j += kTile) {
 			vec_t regs[kNumRegs];
@@ -466,6 +539,7 @@ class FeatureTransformer {
 				v = vec_add_16(v, vec_load_row(&weights_[row_off(add[r]) + j]));
 			vec_store(reinterpret_cast<vec_t*>(acc + j), v);
 		}
+#endif
 #if defined(NNUE_FT_INT8_ROWS) && !defined(NNUE_FT_INT8_NO_RESIDUAL)
 		for (std::size_t k = 0; k < nfr; ++k) fix_row_slow<false>(acc, frem[k]);
 		for (std::size_t k = 0; k < nfa; ++k) fix_row_slow<true>(acc, fadd[k]);
@@ -506,7 +580,11 @@ class FeatureTransformer {
 	// 構造を表す文字列
 	static std::string GetStructureString() {
 		return RawFeatures::GetName() + "[" + std::to_string(kInputDimensions) + "->"
-		       + std::to_string(kHalfDimensions) + "x2]";
+		       + std::to_string(kHalfDimensions) + "x2]"
+#if defined(NNUE_FT_BLOCK_ROWS)
+		       + "[block-rows B=" + std::to_string(kNarrowBlocks) + ", row " + std::to_string(kNarrowWidth) + "]"
+#endif
+		       ;
 	}
 
 	// Read network parameters
@@ -538,19 +616,20 @@ class FeatureTransformer {
 #endif
 #elif defined(USE_ELEMENT_WISE_MULTIPLY)
 		read_leb_128<BiasType>(stream, biases_, kHalfDimensions);
-#if defined(NNUE_THREAT_NARROW_COLS)
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
 		{
-			// 全幅 (kHalf 列) で書かれた LEB128 ブロックをストリーム復号し、Tail 行はそのまま、Head (threat) 行はスライス列だけ
-			// 圧縮格納する。スライス外に非零があれば列マスク訓練のネットでないので読込失敗にする (静かな評価破壊を防ぐ)。
-			const std::size_t tail_count = std::size_t(kHalfDimensions) * kTailRows;
+			// 全幅 (kHalf 列) で書かれた LEB128 ブロックをストリーム復号し、全幅行 (narrow の Tail 行) はそのまま、圧縮行
+			// (narrow: Head 行 / block rows: 全行) はブロック位置の列だけ圧縮格納する。足跡の外に非零があれば
+			// この構造で訓練したネットでないので読込失敗にする (静かな評価破壊を防ぐ)。
+			const std::size_t full_count = std::size_t(kHalfDimensions) * kNarrowRowBegin;
 			std::size_t violations = 0;
 			read_leb_128_sink<WeightType>(stream, std::size_t(kHalfDimensions) * kInputDimensions,
 				[&](std::size_t i, WeightType v) {
-					if (i < tail_count) { wdst[i] = v; return; }
-					const std::size_t k = i - tail_count;
+					if (i < full_count) { wdst[i] = v; return; }
+					const std::size_t k = i - full_count;
 					const std::size_t r = k / kHalfDimensions, c = k % kHalfDimensions;
-					WeightType* row = &wdst[tail_count + r * kNarrowWidth];
-					const std::size_t lo0 = (kNarrowBlocks > 1 ? (r % kNarrowBlocks) : 0) * kNarrowCols;
+					WeightType* row = &wdst[full_count + r * kNarrowWidth];
+					const std::size_t lo0 = std::size_t(narrow_block(IndexType(kNarrowRowBegin + r))) * kNarrowCols;
 					const std::size_t lo1 = kHalfDimensions / 2 + lo0;
 					if (c >= lo0 && c < lo0 + kNarrowCols)
 						row[c - lo0] = v;
@@ -560,8 +639,8 @@ class FeatureTransformer {
 						++violations;
 				});
 			if (violations != 0) {
-				std::fprintf(stderr, "Error! narrow threat build (N=%u, blocks=%u): %llu nonzero weights outside the slice — not a slice-trained net\n",
-				             unsigned(kNarrowCols), unsigned(kNarrowBlocks), (unsigned long long)violations);
+				std::fprintf(stderr, "Error! compact FT rows (N=%u, blocks=%u, from row %u): %llu nonzero weights outside the row footprint — not a net trained for this structure\n",
+				             unsigned(kNarrowCols), unsigned(kNarrowBlocks), unsigned(kNarrowRowBegin), (unsigned long long)violations);
 				return Tools::ResultCode::FileReadError;
 			}
 		}
@@ -605,8 +684,8 @@ class FeatureTransformer {
 			n_fix_rows_ = 0; n_fix_ = 0;
 			for (IndexType r = 0; r < kInputDimensions; ++r) {
 				const std::size_t base = row_off(r);
-#if defined(NNUE_THREAT_NARROW_COLS)
-				const IndexType width = r < kTailRows ? kHalfDimensions : kNarrowWidth;
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+				const IndexType width = compact_row(r) ? kNarrowWidth : kHalfDimensions;
 #else
 				const IndexType width = kHalfDimensions;
 #endif
@@ -645,7 +724,7 @@ class FeatureTransformer {
 	// Write network parameters
 	// パラメータを書き込む
 	bool WriteParameters(std::ostream& stream) const {
-#if defined(THREAT_ATTACKER_MAJOR) || defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_INT8_ROWS)
+#if defined(THREAT_ATTACKER_MAJOR) || defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS) || defined(NNUE_FT_INT8_ROWS)
 		// 並び替え済み配置 / int8 格納の保存は未対応 (標準 pair-major へ逆置換していないため、
 		// このまま書くと他ビルドで読めない nn.bin ができる)。学習系はこのビルドで使わないこと。
 		return false;
@@ -664,9 +743,9 @@ class FeatureTransformer {
 		if (index >= RawFeatures::kTailDimensions)
 			index = RawFeatures::kTailDimensions + ((index - RawFeatures::kTailDimensions) & 4095u);
 #endif
-#if defined(NNUE_THREAT_NARROW_COLS)
-		if (index >= kTailRows)
-			return kHalfDimensions * kTailRows + kNarrowWidth * (index - kTailRows);
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+		if (compact_row(index))
+			return kHalfDimensions * kNarrowRowBegin + kNarrowWidth * (index - kNarrowRowBegin);
 #endif
 		return kHalfDimensions * index;
 	}
@@ -966,8 +1045,8 @@ class FeatureTransformer {
 	}
 
    private:
-#if defined(NNUE_THREAT_NARROW_COLS)
-	// read_leb_128 (nnue_common.h) と同じ符号化を、配列に置かずに sink(i, value) へ流す版 (narrow 格納用)。
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+	// read_leb_128 (nnue_common.h) と同じ符号化を、配列に置かずに sink(i, value) へ流す版 (narrow / block rows の圧縮格納用)。
 	template <typename IntType, typename Sink>
 	static void read_leb_128_sink(std::istream& stream, std::size_t count, Sink sink) {
 		char leb128MagicString[Leb128MagicStringSize];
@@ -1043,18 +1122,18 @@ class FeatureTransformer {
 		for (IndexType i = 0; i < kHalfDimensions * sizeof(BiasType) / sizeof(uint64_t); i += di)
 			order_fn(&b[i]);
 
-#if defined(NNUE_THREAT_NARROW_COLS)
-		// Tail 行は全幅、Head 行は 2N 幅。並び替えは 64 B (AVX2) / 128 B (AVX-512) の群内で閉じているので、
-		// スライス列 (群境界に揃う) を圧縮した行にも同じ群単位で適用できる。
-		for (IndexType j = 0; j < kTailRows; ++j) {
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+		// 全幅行 (narrow の Tail 行) と圧縮行 (2N 幅)。並び替えは 64 B (AVX2) / 128 B (AVX-512) の群内で閉じているので、
+		// スライス列 (群境界に揃う) を圧縮した行にも同じ群単位で適用できる。block rows では全行が圧縮行 (kNarrowRowBegin = 0)。
+		for (IndexType j = 0; j < kNarrowRowBegin; ++j) {
 			uint64_t* w = reinterpret_cast<uint64_t*>(&wts[std::size_t(j) * kHalfDimensions]);
 			for (IndexType i = 0; i < kHalfDimensions * sizeof(WeightType) / sizeof(uint64_t); i += di)
 				order_fn(&w[i]);
 		}
 		static_assert((kNarrowWidth * sizeof(WeightType) / sizeof(uint64_t)) % di == 0, "narrow row must be whole permute groups");
-		for (IndexType j = 0; j < kHeadRows; ++j) {
+		for (IndexType j = 0; j < kNarrowRows; ++j) {
 			uint64_t* w = reinterpret_cast<uint64_t*>(
-				&wts[std::size_t(kHalfDimensions) * kTailRows + std::size_t(j) * kNarrowWidth]);
+				&wts[std::size_t(kHalfDimensions) * kNarrowRowBegin + std::size_t(j) * kNarrowWidth]);
 			for (IndexType i = 0; i < kNarrowWidth * sizeof(WeightType) / sizeof(uint64_t); i += di)
 				order_fn(&w[i]);
 		}
@@ -1123,8 +1202,8 @@ class FeatureTransformer {
 						std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 					}
 					for (const auto index : active_indices[perspective]) {
-#if defined(NNUE_THREAT_NARROW_COLS)
-						if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+						if (narrow_blocked() && narrow_slot(i)) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
 #endif
 						const IndexType offset = row_off(index);
 						auto accumulation      = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
@@ -1146,8 +1225,8 @@ class FeatureTransformer {
 					std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 				}
 				for (const auto index : active_indices[perspective]) {
-#if defined(NNUE_THREAT_NARROW_COLS)
-					if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+					if (narrow_blocked() && narrow_slot(i)) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
 #endif
 					const IndexType offset = row_off(index);
 
@@ -1253,8 +1332,8 @@ class FeatureTransformer {
 					std::memcpy(accumulator.accumulation[perspective][i], prev_accumulator.accumulation[perspective][i],
 					            slot_width(i) * sizeof(BiasType));
 					for (const auto index : removed_indices[perspective]) {
-#if defined(NNUE_THREAT_NARROW_COLS)
-						if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<false>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+						if (narrow_blocked() && narrow_slot(i)) { apply_narrow_row<false>(&accumulator.accumulation[perspective][i][0], index); continue; }
 #endif
 						const IndexType offset = row_off(index);
 #if defined(ENABLE_FT_TRAFFIC_STAT) && !defined(FT_STAT_NO_ROW_TIMING)
@@ -1284,8 +1363,8 @@ class FeatureTransformer {
 					// Difference calculation for features that changed from 0 to 1
 					// 0から1に変化した特徴量に関する差分計算
 					for (const auto index : added_indices[perspective]) {
-#if defined(NNUE_THREAT_NARROW_COLS)
-						if (narrow_blocked() && i == kNarrowSlot) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
+#if defined(NNUE_THREAT_NARROW_COLS) || defined(NNUE_FT_BLOCK_ROWS)
+						if (narrow_blocked() && narrow_slot(i)) { apply_narrow_row<true>(&accumulator.accumulation[perspective][i][0], index); continue; }
 #endif
 						const IndexType offset = row_off(index);
 #if defined(ENABLE_FT_TRAFFIC_STAT) && !defined(FT_STAT_NO_ROW_TIMING)
@@ -1326,6 +1405,10 @@ class FeatureTransformer {
 #if defined(ENABLE_ACC_CACHE)
 	// 1 行の加算/減算 (キャッシュ差分用)
 	inline void add_row(BiasType* acc, IndexType index) const {
+#if defined(NNUE_FT_BLOCK_ROWS)
+		apply_narrow_row<true>(acc, index);   // 圧縮行をブロック位置へ (fix_row 込み)
+		return;
+#endif
 		const IndexType offset = row_off(index);
 #if defined(VECTOR)
 		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
@@ -1338,6 +1421,10 @@ class FeatureTransformer {
 		fix_row<true>(acc, index);
 	}
 	inline void sub_row(BiasType* acc, IndexType index) const {
+#if defined(NNUE_FT_BLOCK_ROWS)
+		apply_narrow_row<false>(acc, index);
+		return;
+#endif
 		const IndexType offset = row_off(index);
 #if defined(VECTOR)
 		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
