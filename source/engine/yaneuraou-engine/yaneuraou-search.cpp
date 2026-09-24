@@ -2274,7 +2274,12 @@ void YaneuraOuWorker::clear() {
 // EvLog: 評価呼び出し統計の窓文脈 (Matryoshka 設計用)。定義は evaluate_nnue.cpp。
 namespace EvLog {
 struct Ctx { int32_t alpha, beta; int16_t depth; uint8_t ply, flags; };
+#if defined(YANEURAOU_ENGINE_NNUE)
 extern thread_local Ctx ctx;
+#else
+// 非 NNUE エディション (MATERIAL 等、makebook peta_shock 用ビルド) には evaluate_nnue.cpp が無いのでここで定義する (2026-09-24)。
+thread_local Ctx ctx;
+#endif
 }
 
 template<NodeType nodeType>

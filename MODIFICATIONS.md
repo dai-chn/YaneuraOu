@@ -458,3 +458,12 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 意味論の検証: 同じブロック構造 (足跡外 = 0) の合成ネットを密 W' ビルドとブロック W' ビルドで読み、探索一致で確認する
   (`tools/search_parity.py`)。NPS 計測は report/52 §21.14〜。
 - 既定ビルドには影響なし (define を付けなければ従来どおり)。
+
+## EvLog::ctx の非 NNUE エディション向け定義 (2026-09-24)
+
+- `engine/yaneuraou-engine/yaneuraou-search.cpp`: フォーク独自の評価呼び出し統計 (EvLog、report/20・33) の窓文脈 `EvLog::ctx` は
+  `eval/nnue/evaluate_nnue.cpp` で定義していたため、NNUE 以外のエディション (MATERIAL 等) でリンクエラー
+  (undefined symbol: YaneuraOu::EvLog::ctx) になっていた。`YANEURAOU_ENGINE_NNUE` が未定義のときは search 側で `thread_local Ctx ctx;` を定義する。NNUE ビルドは不変。
+- 用途: 定跡生成 (やねうら王公式 BookMiner の peta shock) 用の YO-MATERIAL.exe =
+  `make tournament COMPILER=clang++ YANEURAOU_EDITION=YANEURAOU_ENGINE_MATERIAL TARGET_CPU=AVX2 OS=Windows_NT EXTRA_CPPFLAGS="-DENABLE_MAKEBOOK_CMD -DUSE_SFEN_PACKER -DHASH_KEY_BITS=128"`
+  (builds/yaneuraou/material-makebook/YO-MATERIAL.exe、report/57 §14)。
