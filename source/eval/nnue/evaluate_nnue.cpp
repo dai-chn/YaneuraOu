@@ -125,10 +125,15 @@ namespace YaneuraOu { namespace EvalGateSim {
 
 int E = 0;    // ノイズ標準偏差 [cp]。0 で無効
 int C = 200;  // 区間半幅 = (C/100) * E
+// 🌈 絶対閾値モード (2026-10-01、ユーザ決定、docs/dev-roadmap-dr7.md §1 A0):
+//   T > 0 なら窓を見ずに |small| > T のときだけ small を返す (それ以外は large)。
+//   「大差の局面は勝率が決まっているので軽い評価で足りる」の通行料を、窓相対ゲートと同じ合成 small で測る。
+int T = 0;    // 絶対閾値 [cp]。0 で従来の窓相対モード
 
 struct Stats {
     uint64_t decided_lo = 0, decided_hi = 0, escalated = 0, no_ctx = 0;
     uint64_t q_decided = 0, q_escalated = 0;
+    uint64_t decided_abs = 0;   // 絶対閾値モードで small を返した回数
     ~Stats();
 };
 Stats stats;  // Threads=1 前提
@@ -173,8 +178,21 @@ __attribute__((noinline)) int32_t apply(int32_t large, uint64_t key) {
     // mate スコア域に食い込ませない
     small = small < -30000 ? -30000 : (small > 30000 ? 30000 : small);
 
+    const bool q = (c.flags & 2) != 0;
+
+    if (T > 0) {
+        // 絶対閾値モード: 窓と無関係に |small| > T なら small で打ち切り
+        if (small > T || small < -T) {
+            stats.decided_abs++;
+            if (q) stats.q_decided++;
+            return small;
+        }
+        stats.escalated++;
+        if (q) stats.q_escalated++;
+        return large;
+    }
+
     const int32_t half = int32_t((int64_t)E * (int64_t)C / 100);
-    const bool    q    = (c.flags & 2) != 0;
 
     if (small + half <= c.alpha) {  // 上界が alpha 以下 → fail low 確定
         stats.decided_lo++;
@@ -198,14 +216,14 @@ Stats::~Stats() {
     FILE* f = std::fopen(p, "a");
     if (!f)
         return;
-    const uint64_t dec   = decided_lo + decided_hi;
+    const uint64_t dec   = decided_lo + decided_hi + decided_abs;
     const uint64_t total = dec + escalated;
     std::fprintf(f,
-                 "E=%d C=%d total=%llu decided=%llu decided_lo=%llu decided_hi=%llu "
+                 "E=%d C=%d T=%d total=%llu decided=%llu decided_lo=%llu decided_hi=%llu decided_abs=%llu "
                  "escalated=%llu escalate_rate=%.5f no_ctx=%llu "
                  "q_decided=%llu q_escalated=%llu q_escalate_rate=%.5f\n",
-                 E, C, (unsigned long long)total, (unsigned long long)dec,
-                 (unsigned long long)decided_lo, (unsigned long long)decided_hi,
+                 E, C, T, (unsigned long long)total, (unsigned long long)dec,
+                 (unsigned long long)decided_lo, (unsigned long long)decided_hi, (unsigned long long)decided_abs,
                  (unsigned long long)escalated,
                  total ? double(escalated) / double(total) : 0.0,
                  (unsigned long long)no_ctx, (unsigned long long)q_decided,
@@ -301,6 +319,11 @@ void add_options_(OptionsMap& options, ThreadPool& threads) {
                 }));
     Options.add("GateC", Option(200, 0, 1000, [&](const Option& o) {
                     YaneuraOu::EvalGateSim::C = int(o);
+                    return std::nullopt;
+                }));
+    // 絶対閾値モード (|small| > GateT で small を返す)。0 で窓相対モード。
+    Options.add("GateT", Option(0, 0, 3000, [&](const Option& o) {
+                    YaneuraOu::EvalGateSim::T = int(o);
                     return std::nullopt;
                 }));
 #endif
