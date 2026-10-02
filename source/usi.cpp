@@ -178,6 +178,13 @@ namespace Learner {
     void filter_quiet_cmd(Position& pos, std::istringstream& is);
 }
 #endif
+// nnuedump コマンド (eval/nnue/evaluate_nnue.cpp、task#61 A1 / 対の統計、2026-10-02): PSV の局面ごとに
+// active 特徴 index・評価値・accumulator 平面を書き出す。EVAL_NNUE かつ USE_SFEN_PACKER のビルドのみ。
+#if defined(USE_SFEN_PACKER) && defined(EVAL_NNUE)
+namespace Eval {
+    void nnue_dump_cmd(Position& pos, std::istringstream& is);
+}
+#endif
 
 // USIEngine::loop()の下請け。
 // 📝 wasm版対応のため、関数を分離する必要があった。
@@ -458,6 +465,12 @@ bool USIEngine::usi_cmdexec(const std::string& cmd) {
     // EVAL_LEARN は不要 (filter_quiet は学習関数を呼ばないため)。USE_SFEN_PACKER は通常ビルドで常時 ON。
     else if (token == "filter_quiet")
         Learner::filter_quiet_cmd(engine.get_position(), is);
+#endif
+
+#if defined(USE_SFEN_PACKER) && defined(EVAL_NNUE)
+    // nnuedump <in.psv> <out.bin> [max_positions] [--acc]: 局面ごとの active 特徴 index / 評価値 / accumulator の書き出し
+    else if (token == "nnuedump")
+        Eval::nnue_dump_cmd(engine.get_position(), is);
 #endif
 
 

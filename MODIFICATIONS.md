@@ -467,3 +467,11 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 - 用途: 定跡生成 (やねうら王公式 BookMiner の peta shock) 用の YO-MATERIAL.exe =
   `make tournament COMPILER=clang++ YANEURAOU_EDITION=YANEURAOU_ENGINE_MATERIAL TARGET_CPU=AVX2 OS=Windows_NT EXTRA_CPPFLAGS="-DENABLE_MAKEBOOK_CMD -DUSE_SFEN_PACKER -DHASH_KEY_BITS=128"`
   (builds/yaneuraou/material-makebook/YO-MATERIAL.exe、report/57 §14)。
+
+## nnuedump コマンド (2026-10-02)
+
+- `eval/nnue/evaluate_nnue.cpp` / `usi.cpp`: USI 拡張コマンド `nnuedump <in.psv> <out.bin> [max_positions] [--acc]` を追加 (EVAL_NNUE かつ USE_SFEN_PACKER のビルドのみ)。
+  PSV の各局面を全再構築で評価し、教師 score / 勝敗 / 手番 / 手数、評価値 (手番側、FV_SCALE 後)、layer stack bucket、
+  視点 [手番, 非手番] × slot (RawFeatures::kRefreshTriggers の順) ごとの active 特徴 index、`--acc` で accumulator の int16 平面を書き出す。
+  用途: 軽い頭 (lazy threat A1) の後付け学習、残差 × 対の共起からの「昇格すべき対」の統計、clip 飽和率などの診断 (report/52 §21.18)。
+  読み手は `tools/nnue_dump_reader.py`。既定の探索・評価には影響なし (コマンドを呼ばなければ何も変わらない、同一局面の eval 一致を確認)。

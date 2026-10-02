@@ -944,6 +944,106 @@ void print_eval_stat(Position& /*pos*/) {
     std::cout << "--- EVAL STAT: not implemented" << std::endl;
 }
 
+#if defined(USE_SFEN_PACKER)
+// ---- nnuedump (task#61 A1 / 対の統計、2026-10-02) -------------------------------------------------------
+// USI: nnuedump <in.psv> <out.bin> [max_positions] [--acc]
+//   PSV の各局面を set_from_packed_sfen → 全再構築で評価し、局面ごとに
+//   教師 score / 勝敗 / 手番 / 手数、評価値 (手番側、FV_SCALE 後)、layer stack bucket、
+//   視点 [手番, 非手番] × slot (= RawFeatures::kRefreshTriggers の順、halfka2t なら KA2 と threat) ごとの
+//   active 特徴 index (FeatureSet の結合 index 空間: KA2 が 0..kTailDimensions、threat がその後)、
+//   --acc 指定時は accumulator の int16 平面 (視点 × slot × kTransformedFeatureDimensions) を書く。
+//   用途: (a) KA2 平面だけから |eval| > T を判定する小頭の後付け学習 (lazy threat A1)、
+//         (b) 残差 (教師 − 評価値) と対の共起から「昇格すべき対」を選ぶ統計、(c) clip 飽和率などの診断。
+// 形式 (little endian):
+//   "NNUEDUMP" u32 version=1 u32 ft_dims u32 n_slots u32 slot_trigger[n_slots] u32 feature_dims u32 ka2_dims
+//   u8 has_acc u8 pad[3]
+//   レコード: i16 score i8 result u8 stm u16 ply i32 eval u8 bucket u8 pad[3]
+//             { p in [stm, nstm] } { s in slots } : u16 n, u32 idx[n]
+//             has_acc なら { p } { s } : i16 acc[ft_dims]
+namespace {
+struct DumpPackedSfenValue { PackedSfen sfen; s16 score; u16 move; u16 gamePly; s8 game_result; u8 padding; };
+static_assert(sizeof(DumpPackedSfenValue) == 40, "PSV record must be 40 bytes");
+template <typename T> void dump_write(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
+// 単一特徴量の FeatureSet (classic 512 など) には kTailDimensions が無い → 0 (= 全 index が先頭特徴量) として書く
+template <typename T, typename = void> struct DumpTailDims { static constexpr u32 value = 0; };
+template <typename T> struct DumpTailDims<T, std::void_t<decltype(T::kTailDimensions)>> { static constexpr u32 value = (u32)T::kTailDimensions; };
+}
+
+void nnue_dump_cmd(Position& pos, std::istringstream& is) {
+    std::string in, out, tok;
+    size_t max_n = 0;
+    bool with_acc = false;
+    is >> in >> out;
+    while (is >> tok) {
+        if (tok == "--acc") with_acc = true;
+        else max_n = (size_t)std::stoull(tok);
+    }
+    if (in.empty() || out.empty()) {
+        std::cout << "usage: nnuedump <in.psv> <out.bin> [max_positions] [--acc]" << std::endl;
+        return;
+    }
+    std::ifstream fi(in, std::ios::binary);
+    std::ofstream fo(out, std::ios::binary);
+    if (!fi || !fo) {
+        std::cout << "nnuedump: cannot open " << (fi ? out : in) << std::endl;
+        return;
+    }
+    using RF = NNUE::RawFeatures;
+    constexpr u32 n_slots = (u32)RF::kRefreshTriggers.size();
+    constexpr u32 ft_dims = (u32)NNUE::kTransformedFeatureDimensions;
+    fo.write("NNUEDUMP", 8);
+    dump_write(fo, (u32)1);
+    dump_write(fo, ft_dims);
+    dump_write(fo, n_slots);
+    for (u32 s = 0; s < n_slots; ++s) dump_write(fo, (u32)RF::kRefreshTriggers[s]);
+    dump_write(fo, (u32)RF::kDimensions);
+    dump_write(fo, DumpTailDims<RF>::value);
+    dump_write(fo, (u8)(with_acc ? 1 : 0));
+    dump_write(fo, (u8)0); dump_write(fo, (u8)0); dump_write(fo, (u8)0);
+
+    DumpPackedSfenValue rec;
+    StateInfo si;
+    size_t n = 0, skipped = 0;
+    while (fi.read(reinterpret_cast<char*>(&rec), sizeof(rec))) {
+        if (max_n && n >= max_n) break;
+        if (pos.set_from_packed_sfen(rec.sfen, &si, false, rec.gamePly).is_not_ok()) { ++skipped; continue; }
+        const Value v = NNUE::ComputeScore(pos, true);   // 全再構築 → accumulator の全 slot が揃う
+        const auto& acc = pos.state()->accumulator;
+        const Color stm = pos.side_to_move();
+        const Color persp[2] = { stm, ~stm };
+        dump_write(fo, (s16)rec.score);
+        dump_write(fo, (s8)rec.game_result);
+        dump_write(fo, (u8)stm);
+        dump_write(fo, (u16)rec.gamePly);
+        dump_write(fo, (s32)v);
+#if defined(SFNNwoPSQT)
+        dump_write(fo, (u8)NNUE::stack_index_for_nnue(pos));
+#else
+        dump_write(fo, (u8)0);
+#endif
+        dump_write(fo, (u8)0); dump_write(fo, (u8)0); dump_write(fo, (u8)0);
+        NNUE::Features::IndexList active[n_slots][2];
+        for (u32 s = 0; s < n_slots; ++s)
+            RF::AppendActiveIndices(pos, RF::kRefreshTriggers[s], active[s]);
+        for (int p = 0; p < 2; ++p)
+            for (u32 s = 0; s < n_slots; ++s) {
+                const auto& lst = active[s][persp[p]];
+                dump_write(fo, (u16)lst.size());
+                for (const auto idx : lst) dump_write(fo, (u32)idx);
+            }
+        if (with_acc)
+            for (int p = 0; p < 2; ++p)
+                for (u32 s = 0; s < n_slots; ++s)
+                    fo.write(reinterpret_cast<const char*>(&acc.accumulation[persp[p]][s][0]), sizeof(s16) * ft_dims);
+        if (++n % 100000 == 0) std::cout << "nnuedump: " << n << " positions" << std::endl;
+    }
+    fo.close();
+    std::cout << "nnuedump: done " << n << " positions (skipped " << skipped << "), slots " << n_slots
+              << ", ft_dims " << ft_dims << ", features " << RF::kDimensions << " (ka2 " << DumpTailDims<RF>::value << ")"
+              << (with_acc ? ", with acc" : "") << " -> " << out << std::endl;
+}
+#endif // defined(USE_SFEN_PACKER)
+
 } // namespace Eval
 } // namespace YaneuraOu
 
