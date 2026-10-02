@@ -960,6 +960,7 @@ void print_eval_stat(Position& /*pos*/) {
 //   レコード: i16 score i8 result u8 stm u16 ply i32 eval u8 bucket u8 pad[3]
 //             { p in [stm, nstm] } { s in slots } : u16 n, u32 idx[n]
 //             has_acc なら { p } { s } : i16 acc[ft_dims]
+#include <cstring>
 namespace {
 struct DumpPackedSfenValue { PackedSfen sfen; s16 score; u16 move; u16 gamePly; s8 game_result; u8 padding; };
 static_assert(sizeof(DumpPackedSfenValue) == 40, "PSV record must be 40 bytes");
@@ -992,7 +993,7 @@ void nnue_dump_cmd(Position& pos, std::istringstream& is) {
     constexpr u32 n_slots = (u32)RF::kRefreshTriggers.size();
     constexpr u32 ft_dims = (u32)NNUE::kTransformedFeatureDimensions;
     fo.write("NNUEDUMP", 8);
-    dump_write(fo, (u32)2);   // v2: has_acc の後に bias_slot (u8) と FT バイアス i16[ft_dims] を書く
+    dump_write(fo, (u32)3);   // v2: has_acc の後に bias_slot (u8) と FT バイアス i16[ft_dims]。v3: レコードに eval_ka2 (i32、eval の直後) を追加
     dump_write(fo, ft_dims);
     dump_write(fo, n_slots);
     for (u32 s = 0; s < n_slots; ++s) dump_write(fo, (u32)RF::kRefreshTriggers[s]);
@@ -1010,14 +1011,38 @@ void nnue_dump_cmd(Position& pos, std::istringstream& is) {
         if (max_n && n >= max_n) break;
         if (pos.set_from_packed_sfen(rec.sfen, &si, false, rec.gamePly).is_not_ok()) { ++skipped; continue; }
         const Value v = NNUE::ComputeScore(pos, true);   // 全再構築 → accumulator の全 slot が揃う
-        const auto& acc = pos.state()->accumulator;
+        auto& acc = pos.state()->accumulator;
         const Color stm = pos.side_to_move();
         const Color persp[2] = { stm, ~stm };
+        // v3: KA2 平面だけの評価値 (threat 平面を 0、bias は残す) = 「頭を学習しない lazy threat」が返す値。
+        //   KA2 slot (kFriendKingMoved) 以外の平面を退避 → bias だけ (bias slot) か 0 に置換 → ComputeScore(refresh=false) → 復元。
+        s32 v_ka2 = (s32)v;
+        if (n_slots > 1 && n_slots <= 8) {
+            u32 ka2_slot = 0;
+            for (u32 s = 0; s < n_slots; ++s) if (RF::kRefreshTriggers[s] == NNUE::Features::TriggerEvent::kFriendKingMoved) ka2_slot = s;
+            static s16 saved[2][8][NNUE::kTransformedFeatureDimensions];   // n_slots <= 8
+            for (int p = 0; p < 2; ++p)
+                for (u32 s = 0; s < n_slots; ++s) {
+                    if (s == ka2_slot) continue;
+                    std::memcpy(saved[p][s], acc.accumulation[p][s], sizeof(s16) * ft_dims);
+                    if (s == NNUE::FeatureTransformer::kBiasSlot)
+                        std::memcpy(acc.accumulation[p][s], NNUE::networks().feature_transformer.ft_biases(), sizeof(s16) * ft_dims);
+                    else
+                        std::memset(acc.accumulation[p][s], 0, sizeof(s16) * ft_dims);
+                }
+            acc.computed_score = false;
+            v_ka2 = (s32)NNUE::ComputeScore(pos, false);
+            for (int p = 0; p < 2; ++p)
+                for (u32 s = 0; s < n_slots; ++s)
+                    if (s != ka2_slot) std::memcpy(acc.accumulation[p][s], saved[p][s], sizeof(s16) * ft_dims);
+            acc.score = v; acc.computed_score = true;
+        }
         dump_write(fo, (s16)rec.score);
         dump_write(fo, (s8)rec.game_result);
         dump_write(fo, (u8)stm);
         dump_write(fo, (u16)rec.gamePly);
         dump_write(fo, (s32)v);
+        dump_write(fo, v_ka2);
 #if defined(SFNNwoPSQT)
         dump_write(fo, (u8)NNUE::stack_index_for_nnue(pos));
 #else
