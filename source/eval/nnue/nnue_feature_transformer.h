@@ -227,6 +227,9 @@ class FeatureTransformer {
 	using OutputType = TransformedFeatureType;
 	using BiasType   = std::int16_t;
 	using WeightType = std::int16_t;
+	// FT バイアス (accumulator スケール) の読み出し。nnuedump (evaluate_nnue.cpp) が平面と一緒に書き出すために使う。
+	// 平面のうち bias を含む slot は kBiasSlot (= kRefreshTriggers 順で決まる) なので、KA2 平面だけを使う頭を作るときに必要。
+	const BiasType* ft_biases() const { return biases_; }
 #if defined(NNUE_FT_INT8_ROWS)
 	// ★int8 行 (task#82 / report/52 §23.6): FT 重みを nn.bin の値 (w×127、|v| ≤ 127 に clip) のまま int8 で格納し、
 	//   従来の「ロード時 ×2 (scale_weights)」を掛けない。accumulator は従来の 1/2 スケールになり、Transform で

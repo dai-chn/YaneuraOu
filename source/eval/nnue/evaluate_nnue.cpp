@@ -992,14 +992,16 @@ void nnue_dump_cmd(Position& pos, std::istringstream& is) {
     constexpr u32 n_slots = (u32)RF::kRefreshTriggers.size();
     constexpr u32 ft_dims = (u32)NNUE::kTransformedFeatureDimensions;
     fo.write("NNUEDUMP", 8);
-    dump_write(fo, (u32)1);
+    dump_write(fo, (u32)2);   // v2: has_acc の後に bias_slot (u8) と FT バイアス i16[ft_dims] を書く
     dump_write(fo, ft_dims);
     dump_write(fo, n_slots);
     for (u32 s = 0; s < n_slots; ++s) dump_write(fo, (u32)RF::kRefreshTriggers[s]);
     dump_write(fo, (u32)RF::kDimensions);
     dump_write(fo, DumpTailDims<RF>::value);
     dump_write(fo, (u8)(with_acc ? 1 : 0));
-    dump_write(fo, (u8)0); dump_write(fo, (u8)0); dump_write(fo, (u8)0);
+    dump_write(fo, (u8)NNUE::FeatureTransformer::kBiasSlot);
+    dump_write(fo, (u8)0); dump_write(fo, (u8)0);
+    fo.write(reinterpret_cast<const char*>(NNUE::networks().feature_transformer.ft_biases()), sizeof(s16) * ft_dims);
 
     DumpPackedSfenValue rec;
     StateInfo si;
