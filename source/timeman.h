@@ -42,6 +42,12 @@ class TimeManagement {
     TimePoint maximum() const;
     TimePoint minimum() const;  // 📌 やねうら王独自追加。
 
+    // 🌈 #96 時間配分 (report/59): 直前の探索の root 評価値 (内部 Value、手番視点、VALUE_INFINITE = 未知) を init() の前に渡す。
+    //     TimeAllocMode > 0 のとき、|e| と手数から残り手数 R(ply,|e|) と将来の重み和 M(ply,|e|) を表 (timeman_tables.h) で見積もる。
+    void set_prev_score(Value v) { prev_score = v; }
+    // 🌈 #96: |e| >= TimeAllocBigEval のときの硬い下限 [ms] (0 = なし)。探索側は totalTime をこれ以上にする (動的係数で早く止まらない)。
+    TimePoint hard_minimum() const { return hard_min; }
+
     // "go"からの経過時間を返す。
     template<typename FUNC>
     TimePoint elapsed(FUNC nodes) const {
@@ -147,6 +153,8 @@ class TimeManagement {
     TimePoint network_delay;
     TimePoint remain_time;
     bool      round_up_to_fullsecond;
+    Value     prev_score = VALUE_INFINITE;  // 🌈 #96 時間配分: set_prev_score() で渡される直前の root 評価値
+    TimePoint hard_min   = 0;               // 🌈 #96 時間配分: |e| 大のときの硬い下限 (init_() で毎回設定)
 
 	// TODO : あとで
 #if 0

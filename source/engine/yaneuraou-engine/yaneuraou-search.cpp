@@ -964,6 +964,8 @@ void Search::YaneuraOuWorker::start_searching() {
 #else
     auto& mainManager = *main_manager();
 
+    // 🌈 #96 時間配分: 直前の探索の root 評価値を渡す (|e| だけ使うので手番の反転は問わない)
+    mainManager.tm.set_prev_score(mainManager.bestPreviousScore);
     mainManager.tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), options,
                         mainManager.search_options.max_moves_to_draw);
 #endif
@@ -2070,6 +2072,8 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
 
             double totalTime = mainThread->tm.optimum() * fallingEval * reduction
                              * bestMoveInstability * highBestMoveEffort;
+            // 🌈 #96 時間配分: |e| が大きい局面の硬い下限 (TimeAllocBigFloor)。動的係数で下限より早く止まらないようにする。
+            totalTime = std::max(totalTime, double(mainThread->tm.hard_minimum()));
 
             // Cap used time in case of a single legal move for a better viewer experience
             // 視聴者体験を向上させるため、合法手が1つだけの場合に使用時間を上限で制限する

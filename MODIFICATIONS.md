@@ -475,3 +475,9 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   視点 [手番, 非手番] × slot (RawFeatures::kRefreshTriggers の順) ごとの active 特徴 index、`--acc` で accumulator の int16 平面を書き出す。
   用途: 軽い頭 (lazy threat A1) の後付け学習、残差 × 対の共起からの「昇格すべき対」の統計、clip 飽和率などの診断 (report/52 §21.18)。
   読み手は `tools/nnue_dump_reader.py`。既定の探索・評価には影響なし (コマンドを呼ばなければ何も変わらない、同一局面の eval 一致を確認)。
+
+- `timeman.h` / `timeman.cpp` / `timeman_tables.h` / `engine/yaneuraou-engine/yaneuraou-search.cpp`: USI オプション `TimeAllocMode` (0 既定 = 従来、
+  1 = 残り手数の見積り MTG を棋譜から推定した表 R(手数, |評価値|) に置換、2 = 1 に加えて 1 手の重み w = 4P(1−P) (P = σ(|e|/150cp)) を
+  将来の重み和 M(手数, |評価値|) で割った比で optimum を配る) と `TimeAllocGamma` / `TimeAllocBigEval` / `TimeAllocBigFloor` / `TimeAllocScale` を追加。
+  |評価値| は直前の探索の root 評価値 (`TimeManagement::set_prev_score`)。表は電竜戦 DR5/DR6・WCSC34〜36 (+ floodgate 上位) の棋譜から
+  `tools/time_alloc_tables.py` で生成 (shogi-nnue report/59)。既定 (Mode 0) では従来と同一の計算。

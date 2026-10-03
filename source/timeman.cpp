@@ -7,6 +7,8 @@
 #include "thread.h"
 #include "usi.h"
 #include "timeman.h"
+#include "timeman_tables.h"  // 🌈 #96 時間配分の表
+#include <cmath>
 
 namespace YaneuraOu {
 
@@ -54,6 +56,12 @@ void TimeManagement::add_options(OptionsMap& options) {
 	// 持ち時間、各秒のギリギリまで使うか。
     options.add("RoundUpToFullSecond", true);
 
+    // 🌈 #96 時間配分 (report/59): 0 = 従来、1 = 残り手数を表 R(ply,|e|) で見積もる、2 = 1 + 勝率感度 w(e)^γ / M(ply,|e|) で配る
+    options.add("TimeAllocMode", Option(0, 0, 2));
+    options.add("TimeAllocGamma", Option(100, 0, 200));        // γ x100 (1.0 = 対数収益の最適、0 = 均等)
+    options.add("TimeAllocBigEval", Option(1000, 0, 100000));  // |e| [cp] がこれ以上なら下限 TimeAllocBigFloor
+    options.add("TimeAllocBigFloor", Option(3900, 0, 60000));  // [ms] 床 (1.9 s) の 2 倍
+    options.add("TimeAllocScale", Option(100, 10, 400));       // optimum に掛ける百分率 (A/B 用)
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -147,6 +155,7 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 	// 終了時刻は0ならば未確定という意味である。
     startTime = ponderhitTime = limits.startTime;
     search_end                = 0;
+    hard_min                  = 0;  // 🌈 #96
 
 	// 今回の最大残り時間(これを超えてはならない)
 	// byoyomiとincの指定は残り時間にこの時点で加算して考える。
@@ -225,6 +234,44 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 		return;
 	}
 
+	// 🌈 #96 時間配分 (report/59、docs/superpowers/plans/2026-10-03-time-allocation-dr7.md)
+	//   TimeAllocMode 1: 残り手数 MTG を棋譜から推定した表 R(ply,|e|) で置き換える (従来の MoveHorizon は互角で 20〜40%、決着局で 2〜3 倍大きい)
+	//   TimeAllocMode 2: 1 に加えて、1 手の重み w = 4P(1-P) (P = σ(|e|/K)) を将来の重み和 M(ply,|e|) で割った比で配る (t ∝ w^γ、γ=TimeAllocGamma/100)
+	//   |e| は直前の探索の root 評価値 (set_prev_score、cp)。|e| >= TimeAllocBigEval なら optimum の下限を TimeAllocBigFloor [ms] にする (事故防止)。
+	//   表は電竜戦 DR5/DR6 + WCSC34〜36 (+ floodgate 上位) の棋譜から tools/time_alloc_tables.py で生成。
+	int       mtg_alloc    = MTG;
+	double    ta_share     = 0.0;   // 0 なら従来式 (remain_estimate / mtg_alloc)
+	TimePoint ta_big_floor = 0;
+	int       ta_scale     = (int)options["TimeAllocScale"];
+	{
+		int ta_mode = (int)options["TimeAllocMode"];
+		if (ta_mode > 0 && !time_forfeit)
+		{
+			using namespace TimeAllocTables;
+			int e_cp = 0;
+			if (prev_score != VALUE_INFINITE && prev_score != VALUE_NONE)
+				e_cp = (std::abs(int(prev_score)) >= int(VALUE_MATE_IN_MAX_PLY)) ? 100000 : std::abs(USIEngine::to_cp(prev_score));
+			int pi = 0; while (pi + 1 < N_PLY && ply  >= PLY_EDGES[pi + 1]) ++pi;
+			int ei = 0; while (ei + 1 < N_ABS && e_cp >= ABS_EDGES[ei + 1]) ++ei;
+			double R = R10[pi][ei] / 10.0;
+			double M = M100[pi][ei] / 100.0;
+			// MaxMovesToDraw までの残り手数は超えない
+			int mtg_cap = std::max(1, (max_moves_to_draw - ply + 2) / 2);
+			mtg_alloc   = std::clamp((int)std::lround(R), 1, mtg_cap);
+			if (ta_mode >= 2)
+			{
+				double P     = 1.0 / (1.0 + std::exp(-double(e_cp) / K_CP));
+				double w     = 4.0 * P * (1.0 - P);
+				double gamma = (int)options["TimeAllocGamma"] / 100.0;
+				// γ=1: w/M、γ=0: 1/R (均等)、その間は幾何補間
+				ta_share = std::pow(std::max(w, 1e-6) / std::max(M, 1e-6), gamma) * std::pow(1.0 / std::max(R, 1.0), 1.0 - gamma);
+				ta_share = std::min(ta_share, 1.0);
+			}
+			if (e_cp >= (int)options["TimeAllocBigEval"])
+				ta_big_floor = hard_min = (TimePoint)(int)options["TimeAllocBigFloor"];
+		}
+	}
+
 	// minimumとoptimumな時間を適当に計算する。
 
 	{
@@ -242,16 +289,18 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 
 		// 残り手数において残り時間はあとどれくらいあるのか。
 		TimePoint remain_estimate = limits.time[us]
-			+ limits.inc[us] * MTG
+			+ limits.inc[us] * mtg_alloc
 			// 秒読み時間も残り手数に付随しているものとみなす。
-			+ limits.byoyomi[us] * MTG;
+			+ limits.byoyomi[us] * mtg_alloc;
 
 		// 1秒ずつは絶対消費していくねんで！
-		remain_estimate -= (MTG + 1) * 1000;
+		remain_estimate -= (mtg_alloc + 1) * 1000;
 		remain_estimate = std::max(remain_estimate, TimePoint(0));
 
 		// -- optimumTime
-		TimePoint t1 = minimumTime + remain_estimate / MTG;
+		TimePoint t1 = minimumTime + (ta_share > 0.0 ? (TimePoint)(remain_estimate * ta_share) : remain_estimate / mtg_alloc);
+		if (ta_big_floor > 0)
+			t1 = std::max(t1, ta_big_floor);  // 🌈 #96 |e| が大きい局面の下限
 
 		// -- maximumTime
 
@@ -267,14 +316,14 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 			// 1分以下 : ratio = 1.0固定
 			max_ratio = std::min(max_ratio, std::max(float(limits.time[us]) / (60 * 1000), 1.0f));
 		}
-		TimePoint t2 = minimumTime + (int)(remain_estimate * max_ratio / MTG);
+		TimePoint t2 = minimumTime + (int)(remain_estimate * max_ratio / mtg_alloc);
 
 		// ただしmaximumは残り時間の30%以上は使わないものとする。
 		// optimumが超える分にはいい。それは残り手数が少ないときとかなので構わない。
 		t2 = std::min(t2, (TimePoint)(remain_estimate * 0.3));
 
 		// slowMoverは100分率で与えられていて、optimumTimeの係数として作用するものとする。
-		optimumTime = std::min(t1, optimumTime) * slowMover / 100;
+		optimumTime = std::min(t1, optimumTime) * slowMover / 100 * ta_scale / 100;
 		maximumTime = std::min(t2, maximumTime);
 
 		// Ponderが有効でStochastic_Ponderが無効の場合、
