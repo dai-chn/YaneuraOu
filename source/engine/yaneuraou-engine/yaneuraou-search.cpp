@@ -3148,6 +3148,10 @@ Value YaneuraOuWorker::search(Position& pos, Stack* ss, Value alpha, Value beta,
 #endif
 #endif
 #endif
+#if defined(ENABLE_LAZY_THREAT)
+        // lazy threat A3: TT の評価値で済ませた局面でも、子のゲート判定用に「この局面の値」を accumulator に記録しておく (評価はしない)
+        Eval::lazy_note_eval(pos, unadjustedStaticEval);
+#endif
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -4834,6 +4838,9 @@ Value Search::YaneuraOuWorker::qsearch(Position& pos, Stack* ss, Value alpha, Va
 			//     残る全再構築は 3,112 回/3.4M transform (0.09%) しかなく、更新行の増加で総行数は +2%。不採用。
 #endif
 
+#if defined(ENABLE_LAZY_THREAT)
+			Eval::lazy_note_eval(pos, unadjustedStaticEval);   // A3: 子のゲート判定用 (search 側と同じ)
+#endif
 			ss->staticEval = bestValue =
 				to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 

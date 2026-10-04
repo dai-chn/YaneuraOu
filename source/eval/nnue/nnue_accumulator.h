@@ -28,6 +28,9 @@ struct alignas(64) Accumulator {
   bool          threat_computed = false;   // accumulation[*][0] が有効か
   bool          pend_valid      = false;   // pend_* がこの手の差分として有効か (do_move で false、列挙時に true、null move で空の true)
   bool          pend_overflow   = false;   // 差分が kLazyPendMax を超えた (追いつきは全再構築)
+  // A3: 子のゲート判定に使う「この局面の値」(手番視点)。evaluate() (本物/small) と、探索が TT から静的評価を取ったとき (lazy_note_eval) に記録。
+  Value         gate_score = VALUE_ZERO;
+  bool          gate_valid = false;
   std::uint16_t pend_n_rem[2] = {0, 0}, pend_n_add[2] = {0, 0};
   std::uint32_t pend_rem[2][kLazyPendMax], pend_add[2][kLazyPendMax];
 #endif

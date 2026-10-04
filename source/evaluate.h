@@ -39,6 +39,10 @@ namespace Eval {
 	// 評価値自体は返さない。
 	// 備考) 差分計算型の評価関数ではないときは、この関数は何もしなくて良い。
 	void evaluate_with_no_return(const Position& pos);
+#if defined(ENABLE_LAZY_THREAT)
+	// lazy threat A3: 探索が TT から取った静的評価値 (手番視点、補正前) を accumulator に記録する。子のゲート判定に使う。評価は行わない。
+	void lazy_note_eval(const Position& pos, Value v);
+#endif
 
 	// 評価値の内訳表示(デバッグ用)
 	void print_eval_stat(Position& pos);

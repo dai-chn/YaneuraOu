@@ -29,6 +29,8 @@ extern int GTAIL_T;
 extern int GTAIL_GAIN;
 #if defined(ENABLE_LAZY_THREAT)
 extern int LAZY_THREAT_T;
+extern int LAZY_THREAT_MODE;
+extern int LAZY_THREAT_MARGIN;
 #endif
 }
 
@@ -319,6 +321,17 @@ void add_options_(OptionsMap& options, ThreadPool& threads) {
                     YaneuraOu::Eval::NNUE::LAZY_THREAT_T = int(o);
                     return std::nullopt;
                 }));
+    // A3: 0 = 自分の small で判定 (A2)、1 = 親の値で判定して small を返す、2 = 親の値で判定して親の値 (符号反転) を返す
+    // mode 3 = 診断: 先送りせず、|自分の本物の値| > T の回数だけ数える (完全な small を仮定したときのゲート率の天井)
+    // mode 4/5 = A3m: 親の値に「直前の手の駒割の変化」(Position の materialValue 差分) を足した推定値で判定。4 は small を返す、5 は推定値そのものを返す
+    Options.add("LazyThreatMode", Option(0, 0, 5, [&](const Option& o) {
+                    YaneuraOu::Eval::NNUE::LAZY_THREAT_MODE = int(o);
+                    return std::nullopt;
+                }));
+    Options.add("LazyThreatMargin", Option(200, 0, 10000, [&](const Option& o) {   // [cp] 親の値に足す余裕 (mode 1/2)
+                    YaneuraOu::Eval::NNUE::LAZY_THREAT_MARGIN = int(o);
+                    return std::nullopt;
+                }));
 #endif
 
 #if defined(ENABLE_EVAL_GATE_SIM)
@@ -408,6 +421,8 @@ namespace NNUE {
 	int GTAIL_GAIN = 100;
 #if defined(ENABLE_LAZY_THREAT)
 	int LAZY_THREAT_T = 0;   // [cp]、0 = 無効
+	int LAZY_THREAT_MODE = 0;
+	int LAZY_THREAT_MARGIN = 200;   // [cp]
 #endif
 
     // NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
@@ -602,7 +617,8 @@ namespace {
             if (!f) return;
             const auto& s = FeatureTransformer::lazy_stats();
             std::ofstream o(f, std::ios::app);
-            o << "lazy_threat T=" << LAZY_THREAT_T << " small=" << s.n_small.load() << " gated=" << s.n_gated.load() << " pending=" << s.n_pending.load()
+            o << "lazy_threat T=" << LAZY_THREAT_T << " mode=" << LAZY_THREAT_MODE << " margin=" << LAZY_THREAT_MARGIN
+              << " eval=" << s.n_eval.load() << " parent=" << s.n_parent.load() << " small=" << s.n_small.load() << " gated=" << s.n_gated.load() << " pending=" << s.n_pending.load()
               << " catchup=" << s.n_catchup.load() << " catchup_plies=" << s.catchup_plies.load() << " catchup_rows=" << s.catchup_rows.load()
               << " fullrefresh=" << s.n_fullrefresh.load() << '\n';
         }
@@ -955,24 +971,66 @@ Value evaluate(const Position& pos) {
 #endif
 
 #if defined(ENABLE_LAZY_THREAT)
-    if (NNUE::LAZY_THREAT_T > 0 && NNUE::lazy_prepare(pos)) {
-        // slot 1 (KA2) は有効、threat は先送り中: KA2 だけの値でゲート判定
+    if (NNUE::LAZY_THREAT_T > 0) {
         auto& acc = pos.state()->accumulator;
-        const Value small = NNUE::ComputeScoreKa2Only(pos);
         auto& ls = NNUE::FeatureTransformer::lazy_stats();
-        ls.n_small.fetch_add(1, std::memory_order_relaxed);
-        const int threshold = NNUE::LAZY_THREAT_T * (int)PawnValue / 100;   // cp -> Value
-        if (std::abs((int)small) > threshold) {
-            ls.n_gated.fetch_add(1, std::memory_order_relaxed);
-            acc.score = small;
-            acc.computed_score = true;
-            EvLog::log((int32_t)small, 0);
-            return eval_gate(small, pos);
+        ls.n_eval.fetch_add(1, std::memory_order_relaxed);
+        if (NNUE::LAZY_THREAT_MODE == 0) {
+            // A2: 自分の small (KA2 だけの値) を計算して判定。非発火ノードでも small の計算コストが乗る。
+            if (NNUE::lazy_prepare(pos)) {
+                // slot 1 (KA2) は有効、threat は先送り中: KA2 だけの値でゲート判定
+                const Value small = NNUE::ComputeScoreKa2Only(pos);
+                ls.n_small.fetch_add(1, std::memory_order_relaxed);
+                const int threshold = NNUE::LAZY_THREAT_T * (int)PawnValue / 100;   // cp -> Value
+                if (std::abs((int)small) > threshold) {
+                    ls.n_gated.fetch_add(1, std::memory_order_relaxed);
+                    acc.score = small;
+                    acc.computed_score = true;
+                    acc.gate_score = small;
+                    acc.gate_valid = true;
+                    EvLog::log((int32_t)small, 0);
+                    return eval_gate(small, pos);
+                }
+                // 決まっていない: ComputeScore 内の Transform -> UpdateAccumulatorIfPossible(pos, true) -> lazy_catch_up が threat を追いつかせる
+            }
+        } else if (NNUE::LAZY_THREAT_MODE == 3) {
+            // 診断のみ: 下の ComputeScore の後で数える
+        } else {
+            // A3: 親の値 (親の static eval、手番視点。本物か small か TT 由来) で判定。非発火ノードでは何も追加しない。
+            const StateInfo* prev = pos.state()->previous;
+            if (prev && prev->accumulator.gate_valid) {
+                ls.n_parent.fetch_add(1, std::memory_order_relaxed);
+                const int threshold = (NNUE::LAZY_THREAT_T + NNUE::LAZY_THREAT_MARGIN) * (int)PawnValue / 100;
+                // 親の手番視点の値。mode 4/5 は直前の手の駒割の変化 (materialValue は先手視点の増分管理) を親の視点に直して足す = 子の値の推定
+                int e_par = (int)prev->accumulator.gate_score;
+                if (NNUE::LAZY_THREAT_MODE >= 4) {
+                    int dmat = (int)pos.state()->materialValue - (int)prev->materialValue;   // 先手視点
+                    if (pos.side_to_move() == BLACK) dmat = -dmat;                            // 親 (= 後手) の視点へ
+                    e_par += dmat;
+                }
+                if (std::abs(e_par) > threshold && NNUE::lazy_prepare(pos)) {
+                    // 発火: KA2 平面だけ更新済・threat 差分は台帳へ。mode 1/4 = small を計算して返す、mode 2/5 = 推定値の符号反転 (密層も省く)
+                    Value v;
+                    if (NNUE::LAZY_THREAT_MODE == 1 || NNUE::LAZY_THREAT_MODE == 4) { v = NNUE::ComputeScoreKa2Only(pos); ls.n_small.fetch_add(1, std::memory_order_relaxed); }
+                    else                                                           { v = Math::clamp(Value(-e_par), -VALUE_MAX_EVAL, VALUE_MAX_EVAL); }
+                    ls.n_gated.fetch_add(1, std::memory_order_relaxed);
+                    acc.score = v;
+                    acc.computed_score = true;
+                    acc.gate_score = v;
+                    acc.gate_valid = true;
+                    EvLog::log((int32_t)v, 0);
+                    return eval_gate(v, pos);
+                }
+            }
         }
-        // 決まっていない: ComputeScore 内の Transform -> UpdateAccumulatorIfPossible(pos, true) -> lazy_catch_up が threat を追いつかせる
     }
 #endif
     Value score = NNUE::ComputeScore(pos);
+#if defined(ENABLE_LAZY_THREAT)
+    { auto& acc_g = pos.state()->accumulator; acc_g.gate_score = score; acc_g.gate_valid = true; }
+    if (NNUE::LAZY_THREAT_T > 0 && NNUE::LAZY_THREAT_MODE == 3 && std::abs((int)score) > NNUE::LAZY_THREAT_T * (int)PawnValue / 100)
+        NNUE::FeatureTransformer::lazy_stats().n_gated.fetch_add(1, std::memory_order_relaxed);
+#endif
 
 #if defined(ENABLE_PROBE_EVAL_TWICE)
     // ★限界コストプローブ (task#45 / report/49 §4.6):
@@ -1006,10 +1064,19 @@ Value evaluate(const Position& pos) {
 // 差分計算ができるなら進める
 void evaluate_with_no_return(const Position& pos) {
 #if defined(ENABLE_LAZY_THREAT)
-    if (NNUE::LAZY_THREAT_T > 0) { NNUE::UpdateAccumulatorIfPossibleLazy(pos); return; }
+    // A2 (mode 0): threat は先送り (子は small を先に見るので台帳で足りる)。
+    // A3 (mode 1/2): 子は親の値が無いと発火しないので、ここは通常の差分更新 (祖先からの追いつき込み) にする。
+    if (NNUE::LAZY_THREAT_T > 0 && NNUE::LAZY_THREAT_MODE == 0) { NNUE::UpdateAccumulatorIfPossibleLazy(pos); return; }
 #endif
     NNUE::UpdateAccumulatorIfPossible(pos);
 }
+#if defined(ENABLE_LAZY_THREAT)
+void lazy_note_eval(const Position& pos, Value v) {
+    auto& acc = pos.state()->accumulator;
+    acc.gate_score = v;
+    acc.gate_valid = true;
+}
+#endif
 
 // 現在の局面の評価値の内訳を表示する
 void print_eval_stat(Position& /*pos*/) {

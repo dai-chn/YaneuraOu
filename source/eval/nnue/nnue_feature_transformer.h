@@ -764,7 +764,7 @@ class FeatureTransformer {
 	static_assert(kRefreshTriggers[0] == Features::TriggerEvent::kNone && kRefreshTriggers[1] == Features::TriggerEvent::kFriendKingMoved, "slot 0 must be the threat (kNone) slot");
 	static_assert(kBiasSlot == kLazyThreatSlot, "lazy threat assumes the bias lives in the threat slot (dense build; not narrow/block)");
 	static constexpr int kLazyMaxPlies = 32, kLazyMaxRows = 1024;
-	struct LazyStats { std::atomic<uint64_t> n_pending{0}, n_catchup{0}, catchup_plies{0}, catchup_rows{0}, n_fullrefresh{0}, n_small{0}, n_gated{0}; };
+	struct LazyStats { std::atomic<uint64_t> n_pending{0}, n_catchup{0}, catchup_plies{0}, catchup_rows{0}, n_fullrefresh{0}, n_small{0}, n_gated{0}, n_eval{0}, n_parent{0}; };
 	static LazyStats& lazy_stats() { static LazyStats s; return s; }
 
 	// 列挙した threat 差分を pending に保存する (行加算はしない)
@@ -793,33 +793,34 @@ class FeatureTransformer {
 	}
 
 	// 先送りした threat 差分を、slot 0 が有効な祖先からまとめて適用して追いつく
+	// 祖先 A (threat_computed) から現局面まで、先送りした各局面の slot 0 を順に実体化する (A2 v2、10-04 深夜)。
+	//   v1 は経路上の pending を連結して現局面にだけ適用していたので、発火ノードの子が複数評価されるたびに同じ祖先の行を再適用していた
+	//   (mode 4 の実測: 追いつき 1 回 2.5 手・27 行)。途中のノードも実体化すれば、以後の兄弟は 1 手の追いつきで済み、先送りした行は 1 回だけ適用される。
+	//   途中ノードの accumulator は同じスレッドの StateInfo 鎖上にあり書き込んでよい (computed_score の小値はそのまま)。
 	void lazy_catch_up(const Position& pos) const {
 		auto& acc = pos.state()->accumulator;
 		if (acc.threat_computed) return;
-		const StateInfo* chain[kLazyMaxPlies]; int n = 0; bool bad = false;
-		const StateInfo* a = pos.state();
+		StateInfo* chain[kLazyMaxPlies]; int n = 0; bool bad = false;
+		StateInfo* a = pos.state();
 		while (a && !a->accumulator.threat_computed) {
 			if (n >= kLazyMaxPlies || !a->accumulator.pend_valid || a->accumulator.pend_overflow) { bad = true; break; }
 			chain[n++] = a; a = a->previous;
 		}
 		if (bad || !a) { lazy_full_refresh_threat(pos); return; }
-		static thread_local IndexType rem[2][kLazyMaxRows], add[2][kLazyMaxRows];
-		std::size_t nr[2] = {0, 0}, na[2] = {0, 0};
-		for (int k = 0; k < n; ++k) {
-			const auto& pa = chain[k]->accumulator;
-			for (Color p : {BLACK, WHITE}) {
-				if (nr[p] + pa.pend_n_rem[p] > (std::size_t)kLazyMaxRows || na[p] + pa.pend_n_add[p] > (std::size_t)kLazyMaxRows) { lazy_full_refresh_threat(pos); return; }
-				for (int j = 0; j < pa.pend_n_rem[p]; ++j) rem[p][nr[p]++] = (IndexType)pa.pend_rem[p][j];
-				for (int j = 0; j < pa.pend_n_add[p]; ++j) add[p][na[p]++] = (IndexType)pa.pend_add[p][j];
-			}
+		const StateInfo* src = a;
+		std::size_t rows = 0;
+		for (int k = n - 1; k >= 0; --k) {   // chain[n-1] が A の直下、chain[0] が現局面
+			auto& pa = chain[k]->accumulator;
+			for (Color p : {BLACK, WHITE})
+				apply_rows_tiled(&pa.accumulation[p][kLazyThreatSlot][0], &src->accumulator.accumulation[p][kLazyThreatSlot][0], slot_width(kLazyThreatSlot),
+				                 pa.pend_rem[p], pa.pend_n_rem[p], pa.pend_add[p], pa.pend_n_add[p]);
+			rows += pa.pend_n_rem[0] + pa.pend_n_add[0];
+			pa.threat_computed = true;
+			src = chain[k];
 		}
-		for (Color p : {BLACK, WHITE})
-			apply_rows_tiled(&acc.accumulation[p][kLazyThreatSlot][0], &a->accumulator.accumulation[p][kLazyThreatSlot][0], slot_width(kLazyThreatSlot),
-			                 rem[p], nr[p], add[p], na[p]);
-		acc.threat_computed = true;
 		auto& s = lazy_stats();
 		s.n_catchup.fetch_add(1, std::memory_order_relaxed); s.catchup_plies.fetch_add((uint64_t)n, std::memory_order_relaxed);
-		s.catchup_rows.fetch_add((uint64_t)(nr[0] + na[0]), std::memory_order_relaxed);
+		s.catchup_rows.fetch_add((uint64_t)rows, std::memory_order_relaxed);
 	}
 
 	// KA2 平面 + bias だけで Transform する (slot 1 が有効なら呼べる)。出力形式は Transform と同じ。

@@ -1736,6 +1736,7 @@ void Position::do_move_impl(Move m, StateInfo& newSt, bool givesCheck, const T* 
 #if defined(ENABLE_LAZY_THREAT)
     st->accumulator.threat_computed = false;
     st->accumulator.pend_valid      = false;
+    st->accumulator.gate_valid      = false;
     st->accumulator.pend_overflow   = false;
     st->accumulator.pend_n_rem[0] = st->accumulator.pend_n_rem[1] = 0;
     st->accumulator.pend_n_add[0] = st->accumulator.pend_n_add[1] = 0;
@@ -2479,6 +2480,7 @@ void Position::do_null_move(StateInfo& newSt, const T& tt) {
     // null move は局面を変えないので「前局面との threat 差分 = 空」。親の pending の写しを二重適用しないよう空にする。
     st->accumulator.pend_valid    = true;
     st->accumulator.pend_overflow = false;
+    st->accumulator.gate_score    = -st->accumulator.gate_score;   // A3: 局面は同じで手番だけ反転 (gate_valid は親の写しのまま)
     st->accumulator.pend_n_rem[0] = st->accumulator.pend_n_rem[1] = 0;
     st->accumulator.pend_n_add[0] = st->accumulator.pend_n_add[1] = 0;
 #endif
