@@ -62,6 +62,7 @@ void TimeManagement::add_options(OptionsMap& options) {
     options.add("TimeAllocBigEval", Option(1000, 0, 100000));  // |e| [cp] がこれ以上なら下限 TimeAllocBigFloor
     options.add("TimeAllocBigFloor", Option(3900, 0, 60000));  // [ms] 床 (1.9 s) の 2 倍
     options.add("TimeAllocScale", Option(100, 10, 400));       // optimum に掛ける百分率 (A/B 用)
+    options.add("TimeAllocDebug", false);                      // init() ごとに配分の内部値を info string で出す
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -243,6 +244,7 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 	double    ta_share     = 0.0;   // 0 なら従来式 (remain_estimate / mtg_alloc)
 	TimePoint ta_big_floor = 0;
 	int       ta_scale     = (int)options["TimeAllocScale"];
+	int       ta_dbg_e = -1; double ta_dbg_R = 0, ta_dbg_M = 0;
 	{
 		int ta_mode = (int)options["TimeAllocMode"];
 		if (ta_mode > 0 && !time_forfeit)
@@ -255,6 +257,7 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 			int ei = 0; while (ei + 1 < N_ABS && e_cp >= ABS_EDGES[ei + 1]) ++ei;
 			double R = R10[pi][ei] / 10.0;
 			double M = M100[pi][ei] / 100.0;
+			ta_dbg_e = e_cp; ta_dbg_R = R; ta_dbg_M = M;
 			// MaxMovesToDraw までの残り手数は超えない
 			int mtg_cap = std::max(1, (max_moves_to_draw - ply + 2) / 2);
 			mtg_alloc   = std::clamp((int)std::lround(R), 1, mtg_cap);
@@ -348,6 +351,10 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 	}
 
 	// 残り時間 - network_delay2よりは短くしないと切れ負けになる可能性が出てくる。
+	if (options["TimeAllocDebug"])
+		sync_cout << "info string TimeAlloc ply " << ply << " e_cp " << ta_dbg_e << " R " << ta_dbg_R << " M " << ta_dbg_M
+		          << " share " << ta_share << " mtg " << mtg_alloc << " time " << limits.time[us] << " inc " << limits.inc[us]
+		          << " opt " << optimumTime << " max " << maximumTime << " min " << minimumTime << " hardmin " << hard_min << sync_endl;
 	minimumTime = std::min(round_up(minimumTime), remain_time);
 	optimumTime = std::min(         optimumTime , remain_time);
 	maximumTime = std::min(round_up(maximumTime), remain_time);
