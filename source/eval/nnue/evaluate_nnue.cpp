@@ -27,6 +27,9 @@ namespace YaneuraOu::Eval::NNUE {
 extern int FV_SCALE;
 extern int GTAIL_T;
 extern int GTAIL_GAIN;
+#if defined(ENABLE_LAZY_THREAT)
+extern int LAZY_THREAT_T;
+#endif
 }
 
 // ============================================================
@@ -310,6 +313,13 @@ void add_options_(OptionsMap& options, ThreadPool& threads) {
                     YaneuraOu::Eval::NNUE::GTAIL_GAIN = int(o);
                     return std::nullopt;
                 }));
+#if defined(ENABLE_LAZY_THREAT)
+    // lazy threat gate (A2): |KA2 だけの評価値| > LazyThreatT [cp] なら threat 行の更新を先送りしてその値を返す。0 = 無効 (従来と同一)。
+    Options.add("LazyThreatT", Option(0, 0, 30000, [&](const Option& o) {
+                    YaneuraOu::Eval::NNUE::LAZY_THREAT_T = int(o);
+                    return std::nullopt;
+                }));
+#endif
 
 #if defined(ENABLE_EVAL_GATE_SIM)
     // 合成 small eval ゲートのシミュレーション (report45 Phase-0)。GateE=0 で無効。
@@ -396,6 +406,9 @@ namespace NNUE {
 	// テールゲイン単調変換 g のパラメータ (report27)。GTAIL_GAIN=100 (=1.0倍) で恒等。
 	int GTAIL_T = 400;
 	int GTAIL_GAIN = 100;
+#if defined(ENABLE_LAZY_THREAT)
+	int LAZY_THREAT_T = 0;   // [cp]、0 = 無効
+#endif
 
     // NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
     SystemWideSharedConstant<NnueNetworks> shared_networks;
@@ -574,6 +587,27 @@ namespace {
     static void UpdateAccumulatorIfPossible(const Position& pos) {
         networks().feature_transformer.UpdateAccumulatorIfPossible(pos);
     }
+#if defined(ENABLE_LAZY_THREAT)
+    // lazy threat gate: slot 1 だけ更新 (threat は pending に)。戻り値 = accumulator が使える かつ threat が先送り中 (= small を試せる)
+    static bool lazy_prepare(const Position& pos) {
+        if (!networks().feature_transformer.UpdateAccumulatorIfPossible(pos, false)) return false;
+        return !pos.state()->accumulator.threat_computed;
+    }
+    static void UpdateAccumulatorIfPossibleLazy(const Position& pos) {
+        networks().feature_transformer.UpdateAccumulatorIfPossible(pos, false);
+    }
+    struct LazyStatsDump {
+        ~LazyStatsDump() {
+            const char* f = std::getenv("LAZY_THREAT_STATS");
+            if (!f) return;
+            const auto& s = FeatureTransformer::lazy_stats();
+            std::ofstream o(f, std::ios::app);
+            o << "lazy_threat T=" << LAZY_THREAT_T << " small=" << s.n_small.load() << " gated=" << s.n_gated.load() << " pending=" << s.n_pending.load()
+              << " catchup=" << s.n_catchup.load() << " catchup_plies=" << s.catchup_plies.load() << " catchup_rows=" << s.catchup_rows.load()
+              << " fullrefresh=" << s.n_fullrefresh.load() << '\n';
+        }
+    } g_lazy_stats_dump;
+#endif
 
 #if defined(ENABLE_FT_TRAFFIC_STAT)
     // g_ft_stat の実体はヘッダ側の inline 変数。ここは報告のみ。
@@ -651,6 +685,23 @@ namespace {
         if (idx < 0) idx = 0;
         if (idx >= kLayerStacks) idx = kLayerStacks - 1;
         return idx;
+    }
+#endif
+
+#if defined(ENABLE_LAZY_THREAT)
+    // KA2 平面 + bias だけの評価値 (threat 行を使わない)。slot 1 が有効 (computed_accumulation) であること。cache しない。
+    static Value ComputeScoreKa2Only(const Position& pos) {
+        alignas(kCacheLineSize) TransformedFeatureType transformed_features[FeatureTransformer::kBufferSize];
+        networks().feature_transformer.TransformKa2Only(pos, transformed_features);
+        alignas(kCacheLineSize) char buffer[Network::kBufferSize];
+#if defined(SFNNwoPSQT)
+        const auto bucket = stack_index_for_nnue(pos);
+        const auto output = networks().network[bucket].Propagate(transformed_features, buffer);
+#else
+        const auto output = networks().network[0].Propagate(transformed_features, buffer);
+#endif
+        auto score = static_cast<Value>(output[0] / FV_SCALE);
+        return Math::clamp(score, -VALUE_MAX_EVAL, VALUE_MAX_EVAL);
     }
 #endif
 
@@ -903,6 +954,24 @@ Value evaluate(const Position& pos) {
     }
 #endif
 
+#if defined(ENABLE_LAZY_THREAT)
+    if (NNUE::LAZY_THREAT_T > 0 && NNUE::lazy_prepare(pos)) {
+        // slot 1 (KA2) は有効、threat は先送り中: KA2 だけの値でゲート判定
+        auto& acc = pos.state()->accumulator;
+        const Value small = NNUE::ComputeScoreKa2Only(pos);
+        auto& ls = NNUE::FeatureTransformer::lazy_stats();
+        ls.n_small.fetch_add(1, std::memory_order_relaxed);
+        const int threshold = NNUE::LAZY_THREAT_T * (int)PawnValue / 100;   // cp -> Value
+        if (std::abs((int)small) > threshold) {
+            ls.n_gated.fetch_add(1, std::memory_order_relaxed);
+            acc.score = small;
+            acc.computed_score = true;
+            EvLog::log((int32_t)small, 0);
+            return eval_gate(small, pos);
+        }
+        // 決まっていない: ComputeScore 内の Transform -> UpdateAccumulatorIfPossible(pos, true) -> lazy_catch_up が threat を追いつかせる
+    }
+#endif
     Value score = NNUE::ComputeScore(pos);
 
 #if defined(ENABLE_PROBE_EVAL_TWICE)
@@ -936,6 +1005,9 @@ Value evaluate(const Position& pos) {
 
 // 差分計算ができるなら進める
 void evaluate_with_no_return(const Position& pos) {
+#if defined(ENABLE_LAZY_THREAT)
+    if (NNUE::LAZY_THREAT_T > 0) { NNUE::UpdateAccumulatorIfPossibleLazy(pos); return; }
+#endif
     NNUE::UpdateAccumulatorIfPossible(pos);
 }
 

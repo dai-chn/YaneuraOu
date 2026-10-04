@@ -8,6 +8,8 @@
 
 #if defined(EVAL_NNUE)
 
+#include <atomic>
+
 #if defined(SFNNwoPSQT)
 #define USE_ELEMENT_WISE_MULTIPLY
 #endif
@@ -753,16 +755,133 @@ class FeatureTransformer {
 		return kHalfDimensions * index;
 	}
 
+	#if defined(ENABLE_LAZY_THREAT)
+	// ---- lazy threat gate (A2) ------------------------------------------------------------
+	//   slot 0 (threat) の行加算を |small| > T の局面で先送りし、必要になった局面でまとめて追いつく。
+	//   docs/superpowers/specs/2026-10-04-lazy-threat-a2.md。既定ビルド (define 無し) では一切変わらない。
+	static constexpr IndexType kLazyThreatSlot = 0, kLazyKa2Slot = 1;
+	static_assert(kRefreshTriggers.size() == 2, "lazy threat needs FeatureSet<Threat (kNone), HalfKA2 (kFriendKingMoved)>");
+	static_assert(kRefreshTriggers[0] == Features::TriggerEvent::kNone && kRefreshTriggers[1] == Features::TriggerEvent::kFriendKingMoved, "slot 0 must be the threat (kNone) slot");
+	static_assert(kBiasSlot == kLazyThreatSlot, "lazy threat assumes the bias lives in the threat slot (dense build; not narrow/block)");
+	static constexpr int kLazyMaxPlies = 32, kLazyMaxRows = 1024;
+	struct LazyStats { std::atomic<uint64_t> n_pending{0}, n_catchup{0}, catchup_plies{0}, catchup_rows{0}, n_fullrefresh{0}, n_small{0}, n_gated{0}; };
+	static LazyStats& lazy_stats() { static LazyStats s; return s; }
+
+	// 列挙した threat 差分を pending に保存する (行加算はしない)
+	static void lazy_store_pending(Accumulator& acc, const Features::IndexList* rem, const Features::IndexList* add) {
+		acc.pend_overflow = false;
+		for (Color p : {BLACK, WHITE}) {
+			const std::size_t nr = rem[p].size(), na = add[p].size();
+			if (nr > (std::size_t)Accumulator::kLazyPendMax || na > (std::size_t)Accumulator::kLazyPendMax) { acc.pend_overflow = true; acc.pend_n_rem[p] = acc.pend_n_add[p] = 0; continue; }
+			acc.pend_n_rem[p] = (std::uint16_t)nr; acc.pend_n_add[p] = (std::uint16_t)na;
+			for (std::size_t k = 0; k < nr; ++k) acc.pend_rem[p][k] = rem[p][k];
+			for (std::size_t k = 0; k < na; ++k) acc.pend_add[p][k] = add[p][k];
+		}
+		acc.pend_valid = true;
+		lazy_stats().n_pending.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	// slot 0 を現局面から全再構築 (threat は玉に依存しないので常に正しい)。bias 込み。
+	void lazy_full_refresh_threat(const Position& pos) const {
+		auto& acc = pos.state()->accumulator;
+		Features::IndexList active[2];
+		RawFeatures::AppendActiveIndices(pos, kRefreshTriggers[kLazyThreatSlot], active);
+		for (Color p : {BLACK, WHITE})
+			apply_rows_tiled(&acc.accumulation[p][kLazyThreatSlot][0], biases_, slot_width(kLazyThreatSlot), nullptr, 0, active[p].begin(), active[p].size());
+		acc.threat_computed = true;
+		lazy_stats().n_fullrefresh.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	// 先送りした threat 差分を、slot 0 が有効な祖先からまとめて適用して追いつく
+	void lazy_catch_up(const Position& pos) const {
+		auto& acc = pos.state()->accumulator;
+		if (acc.threat_computed) return;
+		const StateInfo* chain[kLazyMaxPlies]; int n = 0; bool bad = false;
+		const StateInfo* a = pos.state();
+		while (a && !a->accumulator.threat_computed) {
+			if (n >= kLazyMaxPlies || !a->accumulator.pend_valid || a->accumulator.pend_overflow) { bad = true; break; }
+			chain[n++] = a; a = a->previous;
+		}
+		if (bad || !a) { lazy_full_refresh_threat(pos); return; }
+		static thread_local IndexType rem[2][kLazyMaxRows], add[2][kLazyMaxRows];
+		std::size_t nr[2] = {0, 0}, na[2] = {0, 0};
+		for (int k = 0; k < n; ++k) {
+			const auto& pa = chain[k]->accumulator;
+			for (Color p : {BLACK, WHITE}) {
+				if (nr[p] + pa.pend_n_rem[p] > (std::size_t)kLazyMaxRows || na[p] + pa.pend_n_add[p] > (std::size_t)kLazyMaxRows) { lazy_full_refresh_threat(pos); return; }
+				for (int j = 0; j < pa.pend_n_rem[p]; ++j) rem[p][nr[p]++] = (IndexType)pa.pend_rem[p][j];
+				for (int j = 0; j < pa.pend_n_add[p]; ++j) add[p][na[p]++] = (IndexType)pa.pend_add[p][j];
+			}
+		}
+		for (Color p : {BLACK, WHITE})
+			apply_rows_tiled(&acc.accumulation[p][kLazyThreatSlot][0], &a->accumulator.accumulation[p][kLazyThreatSlot][0], slot_width(kLazyThreatSlot),
+			                 rem[p], nr[p], add[p], na[p]);
+		acc.threat_computed = true;
+		auto& s = lazy_stats();
+		s.n_catchup.fetch_add(1, std::memory_order_relaxed); s.catchup_plies.fetch_add((uint64_t)n, std::memory_order_relaxed);
+		s.catchup_rows.fetch_add((uint64_t)(nr[0] + na[0]), std::memory_order_relaxed);
+	}
+
+	// KA2 平面 + bias だけで Transform する (slot 1 が有効なら呼べる)。出力形式は Transform と同じ。
+	void TransformKa2Only(const Position& pos, OutputType* output) const {
+#if defined(USE_ELEMENT_WISE_MULTIPLY) && defined(VECTOR) && !defined(NNUE_THREAT_NARROW_COLS) && !defined(NNUE_FT_BLOCK_ROWS)
+		const auto& accumulation = pos.state()->accumulator.accumulation;
+#if defined(USE_AVX512)
+		constexpr IndexType OutputChunkSize = 64;
+#else
+		constexpr IndexType OutputChunkSize = kSimdWidth;
+#endif
+		constexpr IndexType NumOutputChunks = kHalfDimensions / 2 / OutputChunkSize;
+		vec_t Zero = vec_zero();
+		vec_t One = vec_set_16(kFtHalfScale ? 127 : 127 * 2);
+		const vec_t* b0 = reinterpret_cast<const vec_t*>(&biases_[0]);
+		const vec_t* b1 = reinterpret_cast<const vec_t*>(&biases_[kHalfDimensions / 2]);
+		const Color perspectives[2] = { pos.side_to_move(), ~pos.side_to_move() };
+		for (IndexType p = 0; p < 2; ++p) {
+			const IndexType offset = (kHalfDimensions / 2) * p;
+			vec_t* out = reinterpret_cast<vec_t*>(output + offset);
+			const vec_t* in0 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][kLazyKa2Slot][0]));
+			const vec_t* in1 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][kLazyKa2Slot][kHalfDimensions / 2]));
+			constexpr int shift =
+#if defined(USE_SSE2)
+				7 + kFtHalfScale;
+#else
+				6 + kFtHalfScale;
+#endif
+			for (IndexType j = 0; j < NumOutputChunks; ++j) {
+				const vec_t l0a = vec_add_16(in0[j * 2 + 0], b0[j * 2 + 0]), l0b = vec_add_16(in0[j * 2 + 1], b0[j * 2 + 1]);
+				const vec_t l1a = vec_add_16(in1[j * 2 + 0], b1[j * 2 + 0]), l1b = vec_add_16(in1[j * 2 + 1], b1[j * 2 + 1]);
+				const vec_t sum0a = vec_slli_16(vec_max_16(vec_min_16(l0a, One), Zero), shift);
+				const vec_t sum0b = vec_slli_16(vec_max_16(vec_min_16(l0b, One), Zero), shift);
+				vec_t sum1a = vec_min_16(l1a, One);
+				vec_t sum1b = vec_min_16(l1b, One);
+				if constexpr (kFtHalfScale) { sum1a = vec_slli_16(sum1a, 1); sum1b = vec_slli_16(sum1b, 1); }
+				out[j] = vec_packus_16(vec_mulhi_16(sum0a, sum1a), vec_mulhi_16(sum0b, sum1b));
+			}
+		}
+#else
+#error "ENABLE_LAZY_THREAT needs the element-wise (SFNN) vector path on a dense (non-narrow) build"
+#endif
+	}
+#endif  // ENABLE_LAZY_THREAT
+
 	// Proceed with the difference calculation if possible
 	// 可能なら差分計算を進める
-	bool UpdateAccumulatorIfPossible(const Position& pos) const {
+	bool UpdateAccumulatorIfPossible(const Position& pos) const { return UpdateAccumulatorIfPossible(pos, true); }
+	// need_threat=false (lazy threat gate): slot 1 (KA2) だけ更新し、threat (slot 0) は差分を列挙して pending に保存する。
+	bool UpdateAccumulatorIfPossible(const Position& pos, bool need_threat) const {
 		const auto now = pos.state();
 		if (now->accumulator.computed_accumulation) {
+#if defined(ENABLE_LAZY_THREAT)
+			if (need_threat && !now->accumulator.threat_computed) lazy_catch_up(pos);
+#else
+			(void)need_threat;
+#endif
 			return true;
 		}
 		const auto prev = now->previous;
 		if (prev && prev->accumulator.computed_accumulation) {
-			update_accumulator(pos);
+			update_accumulator(pos, need_threat);
 			return true;
 		}
 		return false;
@@ -1241,6 +1360,11 @@ class FeatureTransformer {
 			}
 		}
 
+#if defined(ENABLE_LAZY_THREAT)
+		accumulator.threat_computed = true;
+		accumulator.pend_valid = true; accumulator.pend_overflow = false;
+		accumulator.pend_n_rem[0] = accumulator.pend_n_rem[1] = accumulator.pend_n_add[0] = accumulator.pend_n_add[1] = 0;
+#endif
 		accumulator.computed_accumulation = true;
 		// Stockfishでは fc27d15(2020-09-07) にcomputed_scoreが排除されているので確認
 		accumulator.computed_score = false;
@@ -1248,7 +1372,10 @@ class FeatureTransformer {
 
 	// Calculate cumulative value using difference calculation
 	// 差分計算を用いて累積値を計算する
-	void update_accumulator(const Position& pos) const {
+	void update_accumulator(const Position& pos, bool do_threat = true) const {
+#if !defined(ENABLE_LAZY_THREAT)
+		(void)do_threat;
+#endif
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 		const uint64_t t_upd0 = __rdtsc();
 #endif
@@ -1262,6 +1389,15 @@ class FeatureTransformer {
 			const uint64_t t_col0 = __rdtsc();
 #endif
 			RawFeatures::AppendChangedIndices(pos, kRefreshTriggers[i], removed_indices, added_indices, reset);
+#if defined(ENABLE_LAZY_THREAT)
+			if (i == kLazyThreatSlot && (!do_threat || !prev_accumulator.threat_computed)) {
+				// 行加算を先送り: 列挙した差分だけ pending に保存。do_threat なら祖先からまとめて追いつく (現局面の pending も含む)。
+				lazy_store_pending(accumulator, removed_indices, added_indices);
+				accumulator.threat_computed = false;
+				if (do_threat) lazy_catch_up(pos);
+				continue;
+			}
+#endif
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 			g_ft_stat.cyc_collect += __rdtsc() - t_col0;
 			if (i == 0) g_ft_stat.n_update++;
@@ -1398,6 +1534,10 @@ class FeatureTransformer {
 		}
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 		g_ft_stat.cyc_update += __rdtsc() - t_upd0;
+#endif
+#if defined(ENABLE_LAZY_THREAT)
+		if (do_threat && !accumulator.threat_computed) { accumulator.threat_computed = true; }   // 通常経路で slot 0 を差分適用した
+		if (!accumulator.pend_valid) { accumulator.pend_valid = true; accumulator.pend_n_rem[0] = accumulator.pend_n_rem[1] = accumulator.pend_n_add[0] = accumulator.pend_n_add[1] = 0; }
 #endif
 
 		accumulator.computed_accumulation = true;

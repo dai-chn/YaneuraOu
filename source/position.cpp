@@ -1733,6 +1733,13 @@ void Position::do_move_impl(Move m, StateInfo& newSt, bool givesCheck, const T* 
 #if defined(EVAL_NNUE)
     st->accumulator.computed_accumulation = false;
     st->accumulator.computed_score        = false;
+#if defined(ENABLE_LAZY_THREAT)
+    st->accumulator.threat_computed = false;
+    st->accumulator.pend_valid      = false;
+    st->accumulator.pend_overflow   = false;
+    st->accumulator.pend_n_rem[0] = st->accumulator.pend_n_rem[1] = 0;
+    st->accumulator.pend_n_add[0] = st->accumulator.pend_n_add[1] = 0;
+#endif
 #endif
 
 #if defined(USE_BOARD_EFFECT_PREV)
@@ -2468,6 +2475,13 @@ void Position::do_null_move(StateInfo& newSt, const T& tt) {
 #if defined(USE_CLASSIC_EVAL) && defined(EVAL_NNUE)
     // NNUEの場合、KPPT型と違って、手番が違う場合、計算なしに済ますわけにはいかない。
     st->accumulator.computed_score = false;
+#if defined(ENABLE_LAZY_THREAT)
+    // null move は局面を変えないので「前局面との threat 差分 = 空」。親の pending の写しを二重適用しないよう空にする。
+    st->accumulator.pend_valid    = true;
+    st->accumulator.pend_overflow = false;
+    st->accumulator.pend_n_rem[0] = st->accumulator.pend_n_rem[1] = 0;
+    st->accumulator.pend_n_add[0] = st->accumulator.pend_n_add[1] = 0;
+#endif
 #endif
 
 	// このタイミングでアドレスが確定するのでprefetchしたほうが良い。(かも)
