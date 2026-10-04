@@ -63,6 +63,9 @@ void TimeManagement::add_options(OptionsMap& options) {
     options.add("TimeAllocBigFloor", Option(3900, 0, 60000));  // [ms] 床 (1.9 s) の 2 倍
     options.add("TimeAllocScale", Option(100, 10, 400));       // optimum に掛ける百分率 (A/B 用)
     options.add("TimeAllocDebug", false);                      // init() ごとに配分の内部値を info string で出す
+    // 🌈 #96: maximum = minimum + remain_estimate × (MaxTimeRatio/10) / MTG。SF/やねうら王の既定 5.0 (= 50)。定跡離脱直後の初手が TT 空で
+    //     maximum まで延びる (後手で 40〜50 秒) ので、3.0 などを A/B する。全モード共通。
+    options.add("MaxTimeRatio", Option(50, 10, 100));
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -309,7 +312,7 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 
 		// 5.0fでもうまくマネージメントできる。
 		// 📝 上手くタイムマネージメントできない探索部なら3.0fぐらいにするのが無難。
-		float max_ratio = 5.0f;
+		float max_ratio = (int)options["MaxTimeRatio"] / 10.0f;  // 🌈 #96 (既定 50 = 5.0)
 
 		// 切れ負けルールにおいては、5分を切っていたら、このratioを抑制する。
 		if (time_forfeit)

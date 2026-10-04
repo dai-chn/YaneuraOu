@@ -478,6 +478,6 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 
 - `timeman.h` / `timeman.cpp` / `timeman_tables.h` / `engine/yaneuraou-engine/yaneuraou-search.cpp`: USI オプション `TimeAllocMode` (0 既定 = 従来、
   1 = 残り手数の見積り MTG を棋譜から推定した表 R(手数, |評価値|) に置換、2 = 1 に加えて 1 手の重み w = 4P(1−P) (P = σ(|e|/150cp)) を
-  将来の重み和 M(手数, |評価値|) で割った比で optimum を配る) と `TimeAllocGamma` / `TimeAllocBigEval` / `TimeAllocBigFloor` / `TimeAllocScale` を追加。
+  将来の重み和 M(手数, |評価値|) で割った比で optimum を配る) と `TimeAllocGamma` / `TimeAllocBigEval` / `TimeAllocBigFloor` / `TimeAllocScale` / `TimeAllocDebug` (内部値の info string) / `MaxTimeRatio` (maximum の optimum 比、既定 50 = 従来の 5.0、全モード共通) を追加。
   |評価値| は直前の探索の root 評価値 (`TimeManagement::set_prev_score`)。表は電竜戦 DR5/DR6・WCSC34〜36 (+ floodgate 上位) の棋譜から
   `tools/time_alloc_tables.py` で生成 (shogi-nnue report/59)。既定 (Mode 0) では従来と同一の計算。
