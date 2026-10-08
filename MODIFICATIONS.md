@@ -481,3 +481,9 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   将来の重み和 M(手数, |評価値|) で割った比で optimum を配る) と `TimeAllocGamma` / `TimeAllocBigEval` / `TimeAllocBigFloor` / `TimeAllocScale` / `TimeAllocDebug` (内部値の info string) / `MaxTimeRatio` (maximum の optimum 比、既定 50 = 従来の 5.0、全モード共通) を追加。
   |評価値| は直前の探索の root 評価値 (`TimeManagement::set_prev_score`)。表は電竜戦 DR5/DR6・WCSC34〜36 (+ floodgate 上位) の棋譜から
   `tools/time_alloc_tables.py` で生成 (shogi-nnue report/59)。既定 (Mode 0) では従来と同一の計算。
+
+- `eval/nnue/evaluate_nnue.cpp` / `eval/nnue/evaluate_nnue.h` / `position.h` / `eval/nnue/architectures/nnue_arch_gen.py` (2026-10-08、branch search-port-980):
+  本家やねうら王 9.80git の進行度 (progress) bucket (commit 9a0df6a5 / e47d460f / c1b80eaa) を cherry-pick で取り込み。
+  SFNN の layer stack を「玉位置 bucket × 進行度 bucket (KP 絶対の logistic 回帰、EvalDir/progress.bin = ヘッダ無し double × 81 × 1548)」で選ぶ。
+  本 fork 固有の変更点: 生成器の legacy 接尾辞 `ls<K>[p<P>]` (例 `ls9` = 従来 k3k3、`ls9p8` = k3k3 × progress8 = 72 stacks) を追加、
+  lazy threat / nnuedump との共存 (`#if` の入れ子)。`ls9` (progress 1) では評価値・探索は従来と同一 (固定ノード 20 局面で bestmove/score 一致)。
