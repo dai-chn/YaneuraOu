@@ -481,3 +481,9 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   将来の重み和 M(手数, |評価値|) で割った比で optimum を配る) と `TimeAllocGamma` / `TimeAllocBigEval` / `TimeAllocBigFloor` / `TimeAllocScale` / `TimeAllocDebug` (内部値の info string) / `MaxTimeRatio` (maximum の optimum 比、既定 50 = 従来の 5.0、全モード共通) を追加。
   |評価値| は直前の探索の root 評価値 (`TimeManagement::set_prev_score`)。表は電竜戦 DR5/DR6・WCSC34〜36 (+ floodgate 上位) の棋譜から
   `tools/time_alloc_tables.py` で生成 (shogi-nnue report/59)。既定 (Mode 0) では従来と同一の計算。
+
+- `timeman.h` / `timeman.cpp` / `engine/yaneuraou-engine/yaneuraou-search.cpp` (2026-10-09): USI オプション `PonderhitThinkRatio` (0 既定 = 従来、
+  ponder 中の経過時間のうち ratio% を未使用とみなし、optimum / maximum の判定を `elapsed_effective()` で行う。100 なら ponderhit から改めて optimum 分考える) と
+  `TimeCarrySpread` / `TimeCarryMax` (0 既定 = 無効。各手の「optimum − 自分の時計で使った時間」を繰り越し、次の手から 1/N ずつ optimum と maximum に足す。
+  定跡で飛ばした手と "stop" で終わった go ponder は対象外、`tm.clear()` でリセット)。`TimeAllocDebug` に carry / base_opt / pthink を追加。
+  既定値では従来と同一の計算 (shogi-nnue report/59 §14)。

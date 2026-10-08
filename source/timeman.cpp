@@ -66,6 +66,10 @@ void TimeManagement::add_options(OptionsMap& options) {
     // 🌈 #96: maximum = minimum + remain_estimate × (MaxTimeRatio/10) / MTG。SF/やねうら王の既定 5.0 (= 50)。定跡離脱直後の初手が TT 空で
     //     maximum まで延びる (後手で 40〜50 秒) ので、3.0 などを A/B する。全モード共通。
     options.add("MaxTimeRatio", Option(50, 10, 100));
+    // 🌈 floodgate 10-09 (report/59 §14): ponderhit 後に自分の時計で考える割合と、節約分の繰り越し
+    options.add("PonderhitThinkRatio", Option(0, 0, 100));   // 0 = 従来 (ponder 中の時間を使用済み扱い)、100 = ponderhit から改めて optimum 分考える
+    options.add("TimeCarrySpread", Option(0, 0, 100));       // 0 = 無効。N なら繰り越し carry の 1/N を今回の optimum と maximum に足す
+    options.add("TimeCarryMax", Option(50, 0, 100));         // carry の上限 (残り時間に対する %)
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -160,6 +164,10 @@ void TimeManagement::init_(const Search::LimitsType& limits,
     startTime = ponderhitTime = limits.startTime;
     search_end                = 0;
     hard_min                  = 0;  // 🌈 #96
+    ponder_think_ratio        = (int)options["PonderhitThinkRatio"];
+    carry_spread              = (int)options["TimeCarrySpread"];
+    carry_max_pct             = (int)options["TimeCarryMax"];
+    base_optimum              = 0;
 
 	// 今回の最大残り時間(これを超えてはならない)
 	// byoyomiとincの指定は残り時間にこの時点で加算して考える。
@@ -339,6 +347,17 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 
 	}
 
+	// 🌈 繰り越し (TimeCarrySpread): 前の手までに節約した carry_ms の 1/N を今回の optimum と maximum に足す。
+	//     carry は note_search_end() で「optimum − 自分の時計で使った時間」を積んだもの (ponderhit の即指し、単一合法手、安定局面の早止めで溜まる)。
+	base_optimum = optimumTime;
+	if (carry_spread > 0)
+	{
+		carry_ms = std::min(carry_ms, remain_time * carry_max_pct / 100);
+		TimePoint bonus = carry_ms / carry_spread;
+		optimumTime += bonus;
+		maximumTime += bonus;
+	}
+
 	// 秒読みモードでかつ、持ち時間がないなら、最小思考時間も最大思考時間もその時間にしたほうが得
     isFinalPush = false;
 	if (limits.byoyomi[us])
@@ -357,7 +376,8 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 	if (options["TimeAllocDebug"])
 		sync_cout << "info string TimeAlloc ply " << ply << " e_cp " << ta_dbg_e << " R " << ta_dbg_R << " M " << ta_dbg_M
 		          << " share " << ta_share << " mtg " << mtg_alloc << " time " << limits.time[us] << " inc " << limits.inc[us]
-		          << " opt " << optimumTime << " max " << maximumTime << " min " << minimumTime << " hardmin " << hard_min << sync_endl;
+		          << " opt " << optimumTime << " max " << maximumTime << " min " << minimumTime << " hardmin " << hard_min
+		          << " carry " << carry_ms << " base_opt " << base_optimum << " pthink " << ponder_think_ratio << sync_endl;
 	minimumTime = std::min(round_up(minimumTime), remain_time);
 	optimumTime = std::min(         optimumTime , remain_time);
 	maximumTime = std::min(round_up(maximumTime), remain_time);
@@ -431,6 +451,15 @@ void TimeManagement::set_search_end(TimePoint e) {
 TimePoint TimeManagement::minimum() const { return minimumTime; }
 TimePoint TimeManagement::optimum() const { return optimumTime; }
 TimePoint TimeManagement::maximum() const { return maximumTime; }
+
+// 🌈 探索終了時 (bestmove の直前) に呼ぶ: 今回の optimum (繰り越し前) と、自分の時計で実際に使った時間の差を carry_ms に積む。
+//     自分の時計の消費 = ponderhit (していなければ go) からの経過時間。使い過ぎた手は carry を減らす (0 が下限)。
+void TimeManagement::note_search_end(bool still_pondering, bool use_time_management) {
+	if (carry_spread <= 0 || !use_time_management || still_pondering || base_optimum <= 0)
+		return;
+	TimePoint own_used = now() - ponderhitTime;
+	carry_ms = std::max<TimePoint>(0, carry_ms + base_optimum - own_used);
+}
 
 
 } // namespace YaneuraOu

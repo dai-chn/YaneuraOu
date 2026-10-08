@@ -500,6 +500,10 @@ void YaneuraOuEngine::set_ponderhit(bool b) {
 	//     ponderフラグを見てponderhitTimeを参照して間違った計算をしてしまう。
     manager.tm.ponderhitTime = now();
 
+	// 🌈 PonderhitThinkRatio > 0 なら、ponder 中に時間超過していても即指しせず、ponderhit からの自分の時計 (elapsed_effective) で判定し直す。
+	if (manager.tm.ponder_think_ratio_value() > 0)
+		manager.stopOnPonderhit = false;
+
 	manager.ponder           = b;
 }
 
@@ -1479,6 +1483,11 @@ SKIP_SEARCH:
 
 #endif
 
+    // 🌈 繰り越し (TimeCarrySpread): 今回の optimum と自分の時計で使った時間の差を記録する。
+    //     定跡などで探索を飛ばした手は対象外。go ponder が "stop" で終わった (外れ) ときも対象外 (main_manager()->ponder が残っている)。
+    if (!search_skipped)
+        main_manager()->tm.note_search_end(main_manager()->ponder, limits.use_time_management());
+
     main_manager()->updates.onBestmove(bestmove, ponder);
 }
 
@@ -2087,13 +2096,15 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
 #else
             // 📝 やねうら王では、MainManagerのTimer classのほうから経過時間をもらう。
             auto elapsedTime = mainThread->tm.elapsed_time();
+            // 🌈 ponder 中の時間を PonderhitThinkRatio 分だけ差し引いた経過時間 (optimum / maximum との比較はこちら)
+            auto elapsedEff  = mainThread->tm.elapsed_effective();
 #endif
 
             // Stop the search if we have exceeded the totalTime or maximum
             // totalTime または maximum を超えた場合、探索を停止する
 
 #if STOCKFISH
-            if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum())))
+            if (elapsedEff > std::min(totalTime, double(mainThread->tm.maximum())))
             {
                 // 停止条件を満たした
 
@@ -2110,7 +2121,7 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
                     threads.stop = true;
             }
             else
-                threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.503;
+                threads.increaseDepth = mainThread->ponder || elapsedEff <= totalTime * 0.503;
 
 #else
             /*
@@ -2124,7 +2135,7 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
 					 を呼び出すこと。
 			*/
 
-			if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum())))
+			if (elapsedEff > std::min(totalTime, double(mainThread->tm.maximum())))
             {
 				if (mainThread->ponder)
                     mainThread->stopOnPonderhit = true;
@@ -2134,7 +2145,7 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
             }
             else
                 main_manager()->increaseDepth =
-                  mainThread->ponder || elapsedTime <= totalTime * 0.503;
+                  mainThread->ponder || elapsedEff <= totalTime * 0.503;
 #endif
         }
 
@@ -5670,7 +5681,7 @@ void SearchManager::check_time(Search::YaneuraOuWorker& worker) {
 
         else if (!tm.search_end && worker.limits.use_time_management() &&
 				 // 1.
-				 (elapsed > tm.maximum()
+				 (tm.elapsed_effective() > tm.maximum()   // 🌈 PonderhitThinkRatio
 				 // 2
 				  || stopOnPonderhit))
             tm.set_search_end(elapsed);

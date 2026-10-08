@@ -48,6 +48,19 @@ class TimeManagement {
     // 🌈 #96: |e| >= TimeAllocBigEval のときの硬い下限 [ms] (0 = なし)。探索側は totalTime をこれ以上にする (動的係数で早く止まらない)。
     TimePoint hard_minimum() const { return hard_min; }
 
+    // 🌈 floodgate 10-09 (report/59 §14): ponderhit 後の自分の時計の扱い (PonderhitThinkRatio) と、節約した時間の繰り越し (TimeCarrySpread)。
+    //   elapsed_effective() = go からの経過時間 − (ponder 中の時間 × PonderhitThinkRatio / 100)。
+    //   0 (既定) なら従来 (ponder 中の時間を全部「使った」とみなし、相手の手を当てると即指しになる)、
+    //   100 なら ponderhit から改めて optimum 分だけ自分の時計で考える。optimum / maximum との比較はこの値で行う。
+    TimePoint elapsed_effective() const {
+        TimePoint credit = (ponderhitTime > startTime) ? (ponderhitTime - startTime) * ponder_think_ratio / 100 : 0;
+        return elapsed_time() - credit;
+    }
+    int ponder_think_ratio_value() const { return ponder_think_ratio; }
+    // 探索終了時 (bestmove の直前) に呼ぶ。still_pondering = "stop" で止められた go ponder (外れ) なら繰り越しに数えない。
+    void note_search_end(bool still_pondering, bool use_time_management);
+    TimePoint carry() const { return carry_ms; }
+
     // "go"からの経過時間を返す。
     template<typename FUNC>
     TimePoint elapsed(FUNC nodes) const {
@@ -66,7 +79,7 @@ class TimeManagement {
 
 	// 初期化。
     // 🌈　やねうら王では使わない。Stockfishとの互換性のために用意。
-    void clear() {}
+    void clear() { carry_ms = 0; base_optimum = 0; }   // 🌈 繰り越し (TimeCarrySpread) は対局ごとにリセット
 
 #if STOCKFISH
 
@@ -155,6 +168,11 @@ class TimeManagement {
     bool      round_up_to_fullsecond;
     Value     prev_score = VALUE_INFINITE;  // 🌈 #96 時間配分: set_prev_score() で渡される直前の root 評価値
     TimePoint hard_min   = 0;               // 🌈 #96 時間配分: |e| 大のときの硬い下限 (init_() で毎回設定)
+    int       ponder_think_ratio = 0;   // 🌈 PonderhitThinkRatio
+    int       carry_spread       = 0;   // 🌈 TimeCarrySpread (0 = 繰り越し無し)
+    int       carry_max_pct      = 50;  // 🌈 TimeCarryMax: carry の上限 (remain_time に対する %)
+    TimePoint carry_ms           = 0;   // 🌈 節約して繰り越した時間 [ms] (対局中ずっと保持、clear() でリセット)
+    TimePoint base_optimum       = 0;   // 🌈 今回の optimum (繰り越し加算前)。note_search_end() で使う
 
 	// TODO : あとで
 #if 0
