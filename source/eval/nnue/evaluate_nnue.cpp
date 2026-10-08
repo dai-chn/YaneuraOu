@@ -993,6 +993,7 @@ namespace {
         if (idx < 0) idx = 0;
         if (idx >= kLayerStacks) idx = kLayerStacks - 1;
         return idx;
+#endif
     }
 #endif
 
