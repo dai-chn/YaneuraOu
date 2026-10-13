@@ -25,6 +25,11 @@
 #include "../../thread.h"
 #include "../../misc.h"
 #include "../../tt.h"
+#include <algorithm>
+#include <cstdlib>
+#include <deque>
+#include <fstream>
+#include <sstream>
 #include "../../book/book.h"
 
 #if defined(ENABLE_BOOK_ESCAPE)
@@ -323,6 +328,9 @@ void YaneuraOuEngine::add_options() {
 	// その局面での上位N個の候補手を調べる機能
     // ⇨　これMAX_MOVESで十分。
     options.add("MultiPV", Option(1, 1, MAX_MOVES));
+    // 🌈 準定跡 (report/57 §17): 事前に読んだ PV を go の前に置換表へ書く。SeedFile = TSV (sfen \t pv \t value \t depth)、空なら無効
+    options.add("SeedFile", Option(""));
+    options.add("SeedDebug", Option(false));
 
     options.add("DrawValueBlack", Option(-2, -30000, 30000));
     options.add("DrawValueWhite", Option(-2, -30000, 30000));
@@ -459,12 +467,94 @@ void YaneuraOuEngine::isready() {
 
 	// 定跡の読み込み
     book.read_book();
+	// 🌈 準定跡の読み込み (SeedFile)
+    read_seeds(std::string(options["SeedFile"]));
 
 	// 🌈 tune.pyによってここ以下に自動的にエンジンオプションが追加される。
     //                      %%TUNE_ISREADY%%
 
 
     sync_cout << "readyok" << sync_endl;
+}
+
+// 🌈 準定跡 (SeedFile、report/57 §17): "sfen <board> <turn> <hands> [ply]\t<pv usi ...>\t<value cp (手番側)>\t<depth>" の TSV を読み、
+//     局面の hash → PV を持つ。'#' 行は無視。
+void YaneuraOuEngine::read_seeds(const std::string& path) {
+#if HASH_KEY_BITS <= 64
+    seeds.clear();
+    if (path.empty() || path == "<empty>")
+        return;
+    std::ifstream f(path);
+    if (!f)
+    {
+        sync_cout << "info string seed: cannot open " << path << sync_endl;
+        return;
+    }
+    std::string line;
+    size_t n = 0, bad = 0;
+    while (std::getline(f, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        std::vector<std::string> cols;
+        {
+            std::string c; std::istringstream ls(line);
+            while (std::getline(ls, c, '\t')) cols.push_back(c);
+        }
+        if (cols.size() < 4) { ++bad; continue; }
+        std::string sfen = cols[0];
+        if (sfen.rfind("sfen ", 0) == 0) sfen = sfen.substr(5);
+        Position p; StateInfo si;
+        if (p.set(sfen, &si)) { ++bad; continue; }
+        SeedEntry e;
+        { std::istringstream ps(cols[1]); std::string m; while (ps >> m) e.pv.push_back(m); }
+        char* end2 = nullptr; char* end3 = nullptr;
+        e.value = int(std::strtol(cols[2].c_str(), &end2, 10));
+        e.depth = int(std::strtol(cols[3].c_str(), &end3, 10));
+        if (end2 == cols[2].c_str() || end3 == cols[3].c_str()) { ++bad; continue; }
+        if (e.pv.empty()) { ++bad; continue; }
+        seeds[p.key()] = std::move(e);
+        ++n;
+    }
+    sync_cout << "info string seed: " << n << " positions loaded from " << path
+              << (bad ? " (skipped " + std::to_string(bad) + ")" : "") << sync_endl;
+#else
+    sync_cout << "info string seed: not supported with HASH_KEY_BITS > 64" << sync_endl;
+#endif
+}
+
+// 🌈 root 局面の記録があれば、PV の各局面に EXACT / 深さ max(1, d0 − j) / 値 ±v (手番側) の entry を書く。書いた数を返す。
+//     PV ノードでは置換表の値で打ち切らない (主線は読み直される) ので、記録は事前分布として働く。
+int YaneuraOuEngine::apply_seeds(Position& pos, TranspositionTable& tt_) {
+#if HASH_KEY_BITS <= 64
+    auto it = seeds.find(pos.key());
+    if (it == seeds.end())
+        return 0;
+    const SeedEntry& e = it->second;
+    std::deque<StateInfo> sts;
+    std::vector<Move> played;
+    int written = 0;
+    const Value v = Value(std::clamp(e.value, -int(VALUE_MAX_EVAL), int(VALUE_MAX_EVAL)));
+    for (size_t j = 0; j < e.pv.size(); ++j)
+    {
+        Move m = pos.to_move(USIEngine::to_move16(e.pv[j]));
+        if (!(pos.pseudo_legal_s<true>(m) && pos.legal(m)))
+            break;
+        const Depth d  = std::max(1, e.depth - int(j));
+        const Value vj = (j % 2 == 0) ? v : -v;
+        auto [hit, data, writer] = tt_.probe(pos.key(), pos);
+        writer.write(pos.key(), vj, true, BOUND_EXACT, d, m, VALUE_NONE, tt_.generation());
+        ++written;
+        sts.emplace_back();
+        pos.do_move(m, sts.back());
+        played.push_back(m);
+    }
+    for (auto r = played.rbegin(); r != played.rend(); ++r)
+        pos.undo_move(*r);
+    return written;
+#else
+    return 0;
+#endif
 }
 
 // StockfishのThreadPool::clear()にあったもの。
@@ -1162,6 +1252,16 @@ void Search::YaneuraOuWorker::start_searching() {
 
     if (probeResult.bestmove)
         goto SKIP_SEARCH;
+
+    // 🌈 準定跡 (SeedFile): root 局面の記録 PV を置換表に書いてから探索する (手の順序 + PV 以外のノードの打ち切り)。
+#if HASH_KEY_BITS <= 64
+    if (!engine.seeds.empty())
+    {
+        int n_seed = engine.apply_seeds(rootPos, tt);
+        if (n_seed > 0 && bool(options["SeedDebug"]))
+            sync_cout << "info string seed: " << n_seed << " TT entries written" << sync_endl;
+    }
+#endif
 
     // ---------------------
     //    通常の思考処理

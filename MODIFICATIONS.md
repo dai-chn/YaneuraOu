@@ -487,3 +487,8 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `TimeCarrySpread` / `TimeCarryMax` (0 既定 = 無効。各手の「optimum − 自分の時計で使った時間」を繰り越し、次の手から 1/N ずつ optimum と maximum に足す。
   定跡で飛ばした手と "stop" で終わった go ponder は対象外、`tm.clear()` でリセット)。`TimeAllocDebug` に carry / base_opt / pthink を追加。
   既定値では従来と同一の計算 (shogi-nnue report/59 §14)。
+
+- `engine/yaneuraou-engine/yaneuraou-search.{h,cpp}` (2026-10-14): 準定跡 (USI オプション `SeedFile`、既定 "" = 無効、`SeedDebug`)。
+  TSV (`sfen \t pv(usi) \t value(手番側 cp) \t depth`) を isready で読み (局面 hash → PV)、go の前に root 局面の記録があれば
+  PV の各局面に EXACT / 深さ max(1, d0−j) / 値 ±v の置換表 entry を書いてから探索する (定跡として従うのではなく探索の事前分布)。
+  定跡 (BookFile) が手を返したときは何もしない。HASH_KEY_BITS > 64 では無効。shogi-nnue report/57 §17。

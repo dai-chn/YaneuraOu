@@ -10,6 +10,9 @@
 #include "../../book/book.h"
 #include "../../tt.h"
 #include "../../score.h"
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace YaneuraOu {
 
@@ -401,6 +404,15 @@ class YaneuraOuEngine: public Engine {
 
     // 定跡の指し手を選択するモジュール
     Book::BookMoveSelector book;
+
+    // 🌈 準定跡 (SeedFile、shogi-nnue report/57 §17): 局面 → 事前に読んで記録した PV (usi) と値 (手番側 cp) と深さ。
+    //     定跡として従うのではなく、go の前に置換表へ書き込み (PV の各局面に EXACT / 深さ d0−j の entry)、探索の事前分布にする。
+#if HASH_KEY_BITS <= 64
+    struct SeedEntry { std::vector<std::string> pv; int value; int depth; };
+    std::unordered_map<Key, SeedEntry> seeds;
+#endif
+    void read_seeds(const std::string& path);                 // isready で読む (空なら無効)
+    int  apply_seeds(Position& pos, TranspositionTable& tt_);  // root 局面の記録があれば TT に書く。書いた entry 数
 
     // 探索manager
     // 📝 やねうら王では、Engine派生classがSearchMangerを持っている。
