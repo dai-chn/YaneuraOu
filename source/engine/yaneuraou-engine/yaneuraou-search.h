@@ -411,8 +411,16 @@ class YaneuraOuEngine: public Engine {
     struct SeedEntry { std::vector<std::string> pv; int value; int depth; };
     std::unordered_map<Key, SeedEntry> seeds;
 #endif
-    void read_seeds(const std::string& path);                 // isready で読む (空なら無効)
-    int  apply_seeds(Position& pos, TranspositionTable& tt_);  // root 局面の記録があれば TT に書く。書いた entry 数
+    // v2 (木ごと): seeddump が書いた局面ごとの entry。isready と go のたびに置換表へ書き戻す (SeedRewriteMax 以下なら)。
+    struct SeedNode { Key key; Color stm; Move16 move; int16_t value; int8_t depth; uint8_t bound; };
+    std::vector<SeedNode> seed_nodes;                          // root 無しの node (旧 v2 形式)
+    std::unordered_map<Key, std::vector<SeedNode>> seed_groups; // root の key → その探索木の node
+    size_t seed_group_total = 0;
+    void read_seeds(const std::string& path);                 // isready で読む (空なら無効)。v1 (PV) と v2 (木) の両方
+    int  apply_seeds(Position& pos, TranspositionTable& tt_);  // v1: root 局面の PV を TT に書く。書いた entry 数
+    int  write_seed_nodes(TranspositionTable& tt_);            // v2: root 無しの node を TT に書く。書いた数
+    int  write_seed_group(TranspositionTable& tt_, Key root);  // v2b: root の木を TT に書く (無ければ 0)
+    virtual void seed_dump(std::istringstream& is) override;   // "seeddump <out> [min_depth] [max_ply] [max_nodes]"
 
     // 探索manager
     // 📝 やねうら王では、Engine派生classがSearchMangerを持っている。

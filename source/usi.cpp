@@ -468,6 +468,11 @@ bool USIEngine::usi_cmdexec(const std::string& cmd) {
 #endif
 
 #if defined(USE_SFEN_PACKER) && defined(EVAL_NNUE)
+    // seeddump <out.tsv> [min_depth] [max_ply] [max_nodes]: 準定跡 v2 (直前の探索の置換表から root 以下の木を書き出す)
+    else if (token == "seeddump")
+        engine.seed_dump(is);
+#endif
+#if defined(USE_SFEN_PACKER) && defined(EVAL_NNUE)
     // nnuedump <in.psv> <out.bin> [max_positions] [--acc]: 局面ごとの active 特徴 index / 評価値 / accumulator の書き出し
     else if (token == "nnuedump")
         Eval::nnue_dump_cmd(engine.get_position(), is);

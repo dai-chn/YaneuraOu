@@ -26,6 +26,7 @@
 #include "../../misc.h"
 #include "../../tt.h"
 #include <algorithm>
+#include <unordered_set>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
@@ -331,6 +332,7 @@ void YaneuraOuEngine::add_options() {
     // 🌈 準定跡 (report/57 §17): 事前に読んだ PV を go の前に置換表へ書く。SeedFile = TSV (sfen \t pv \t value \t depth)、空なら無効
     options.add("SeedFile", Option(""));
     options.add("SeedDebug", Option(false));
+    options.add("SeedRewriteMax", Option(300000, 0, 100000000));   // v2 の node 数がこれ以下なら go のたびに TT へ書き戻す
 
     options.add("DrawValueBlack", Option(-2, -30000, 30000));
     options.add("DrawValueWhite", Option(-2, -30000, 30000));
@@ -469,6 +471,16 @@ void YaneuraOuEngine::isready() {
     book.read_book();
 	// 🌈 準定跡の読み込み (SeedFile)
     read_seeds(std::string(options["SeedFile"]));
+#if HASH_KEY_BITS <= 64
+    if (!seed_nodes.empty())
+        sync_cout << "info string seed: " << write_seed_nodes(tt) << " TT entries written (v2)" << sync_endl;
+    if (seed_group_total > 0 && seed_group_total <= size_t(int(options["SeedRewriteMax"])))
+    {
+        int nw = 0;
+        for (auto& kv : seed_groups) nw += write_seed_group(tt, kv.first);
+        sync_cout << "info string seed: " << nw << " TT entries written (v2b, all roots)" << sync_endl;
+    }
+#endif
 
 	// 🌈 tune.pyによってここ以下に自動的にエンジンオプションが追加される。
     //                      %%TUNE_ISREADY%%
@@ -482,6 +494,9 @@ void YaneuraOuEngine::isready() {
 void YaneuraOuEngine::read_seeds(const std::string& path) {
 #if HASH_KEY_BITS <= 64
     seeds.clear();
+    seed_nodes.clear();
+    seed_groups.clear();
+    seed_group_total = 0;
     if (path.empty() || path == "<empty>")
         return;
     std::ifstream f(path);
@@ -492,14 +507,41 @@ void YaneuraOuEngine::read_seeds(const std::string& path) {
     }
     std::string line;
     size_t n = 0, bad = 0;
+    std::vector<SeedNode>* group = &seed_nodes;   // 現在の group (#root 行で切り替わる)
     while (std::getline(f, line))
     {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("#root ", 0) == 0)
+        {
+            std::istringstream hs(line.substr(6)); std::string keyhex; hs >> keyhex;
+            char* eh = nullptr;
+            Key rk = Key(std::strtoull(keyhex.c_str(), &eh, 16));
+            group = (eh == keyhex.c_str()) ? &seed_nodes : &seed_groups[rk];
+            continue;
+        }
         if (line.empty() || line[0] == '#') continue;
         std::vector<std::string> cols;
         {
             std::string c; std::istringstream ls(line);
             while (std::getline(ls, c, '\t')) cols.push_back(c);
+        }
+        if (cols.size() >= 6)
+        {
+            // v2: key(hex) \t sfen \t move \t value \t depth \t bound
+            char* e1 = nullptr; char* e2 = nullptr; char* e3 = nullptr; char* e4 = nullptr;
+            SeedNode nd;
+            nd.key = Key(std::strtoull(cols[0].c_str(), &e1, 16));
+            std::istringstream ss(cols[1]); std::string board, turn; ss >> board >> turn;
+            nd.stm = (turn == "w") ? WHITE : BLACK;
+            nd.move = (cols[2] == "none") ? Move16::none() : USIEngine::to_move16(cols[2]);
+            nd.value = int16_t(std::strtol(cols[3].c_str(), &e2, 10));
+            nd.depth = int8_t(std::strtol(cols[4].c_str(), &e3, 10));
+            nd.bound = uint8_t(std::strtol(cols[5].c_str(), &e4, 10));
+            if (e1 == cols[0].c_str() || e2 == cols[3].c_str() || e3 == cols[4].c_str() || nd.depth < 1) { ++bad; continue; }
+            group->push_back(nd);
+            if (group != &seed_nodes) ++seed_group_total;
+            ++n;
+            continue;
         }
         if (cols.size() < 4) { ++bad; continue; }
         std::string sfen = cols[0];
@@ -516,7 +558,7 @@ void YaneuraOuEngine::read_seeds(const std::string& path) {
         seeds[p.key()] = std::move(e);
         ++n;
     }
-    sync_cout << "info string seed: " << n << " positions loaded from " << path
+    sync_cout << "info string seed: " << n << " positions loaded from " << path << " (" << seed_groups.size() << " roots)"
               << (bad ? " (skipped " + std::to_string(bad) + ")" : "") << sync_endl;
 #else
     sync_cout << "info string seed: not supported with HASH_KEY_BITS > 64" << sync_endl;
@@ -554,6 +596,86 @@ int YaneuraOuEngine::apply_seeds(Position& pos, TranspositionTable& tt_) {
     return written;
 #else
     return 0;
+#endif
+}
+
+// 🌈 v2b: root の木だけを置換表に書く。
+int YaneuraOuEngine::write_seed_group(TranspositionTable& tt_, Key root) {
+#if HASH_KEY_BITS <= 64
+    auto it = seed_groups.find(root);
+    if (it == seed_groups.end()) return 0;
+    for (const auto& nd : it->second)
+        tt_.seed_write(nd.key, nd.stm, nd.move, Value(nd.value), Depth(nd.depth), Bound(nd.bound));
+    return int(it->second.size());
+#else
+    (void)tt_; (void)root; return 0;
+#endif
+}
+
+// 🌈 v2: 記録した全 node を置換表に書く (isready と、SeedRewriteMax 以下なら go のたび)。
+int YaneuraOuEngine::write_seed_nodes(TranspositionTable& tt_) {
+#if HASH_KEY_BITS <= 64
+    for (const auto& nd : seed_nodes)
+        tt_.seed_write(nd.key, nd.stm, nd.move, Value(nd.value), Depth(nd.depth), Bound(nd.bound));
+    return int(seed_nodes.size());
+#else
+    return 0;
+#endif
+}
+
+#if HASH_KEY_BITS <= 64
+namespace {
+// root 以下を DFS し、置換表に depth >= min_depth の entry がある局面だけ書き出す (子へは記録した局面からのみ進む)。
+void seed_dump_rec(Position& pos, const TranspositionTable& tt_, std::ofstream& out, int ply, int min_depth, int max_ply, long max_nodes, long& written, long& visited, std::unordered_set<Key>& seen) {
+    if (written >= max_nodes) return;
+    if (!seen.insert(pos.key()).second) return;   // 合流 (transposition) と循環は 1 回だけ
+    ++visited;
+    auto [hit, data, writer] = tt_.probe(pos.key(), pos);
+    if (!hit || data.depth < min_depth) return;
+    if (data.value == VALUE_NONE || std::abs(int(data.value)) >= int(VALUE_MATE_IN_MAX_PLY)) return;
+    {
+        std::istringstream ss(pos.sfen()); std::string b, t, h; ss >> b >> t >> h;
+        char keybuf[24]; std::snprintf(keybuf, sizeof(keybuf), "%016llx", (unsigned long long)pos.key());
+        out << keybuf << '\t' << b << ' ' << t << ' ' << h << '\t' << (data.move ? to_usi_string(data.move) : std::string("none"))
+            << '\t' << int(data.value) << '\t' << int(data.depth) << '\t' << int(data.bound) << '\n';
+        ++written;
+    }
+    if (ply >= max_ply) return;
+    for (const auto& m : MoveList<LEGAL>(pos))
+    {
+        StateInfo si;
+        pos.do_move(m, si);
+        seed_dump_rec(pos, tt_, out, ply + 1, min_depth, max_ply, max_nodes, written, visited, seen);
+        pos.undo_move(m);
+        if (written >= max_nodes) return;
+    }
+}
+}
+#endif
+
+// 🌈 "seeddump <out.tsv> [min_depth=8] [max_ply=24] [max_nodes=2000000]": 直前の探索の置換表から、現在の局面以下の木を v2 形式で追記する。
+void YaneuraOuEngine::seed_dump(std::istringstream& is) {
+#if HASH_KEY_BITS <= 64
+    std::string path; int min_depth = 8, max_ply = 24; long max_nodes = 2000000;
+    is >> path >> min_depth >> max_ply >> max_nodes;
+    if (path.empty()) { sync_cout << "info string seeddump: usage seeddump <out.tsv> [min_depth] [max_ply] [max_nodes]" << sync_endl; return; }
+    std::ofstream out(path, std::ios::app);
+    if (!out) { sync_cout << "info string seeddump: cannot open " << path << sync_endl; return; }
+    Position root; std::deque<StateInfo> sts; sts.emplace_back();
+    root.set(pos.sfen(), &sts.back());
+    {
+        std::istringstream ss(root.sfen()); std::string b, t, h; ss >> b >> t >> h;
+        char keybuf[24]; std::snprintf(keybuf, sizeof(keybuf), "%016llx", (unsigned long long)root.key());
+        out << "#root " << keybuf << ' ' << b << ' ' << t << ' ' << h << '\n';
+    }
+    long written = 0, visited = 0;
+    std::unordered_set<Key> seen;
+    seed_dump_rec(root, tt, out, 0, min_depth, max_ply, max_nodes, written, visited, seen);
+    out.flush();
+    sync_cout << "info string seeddump: done " << written << " nodes written (visited " << visited << ", min_depth " << min_depth << ", max_ply " << max_ply << ")" << sync_endl;
+#else
+    (void)is;
+    sync_cout << "info string seeddump: not supported with HASH_KEY_BITS > 64" << sync_endl;
 #endif
 }
 
@@ -1255,6 +1377,18 @@ void Search::YaneuraOuWorker::start_searching() {
 
     // 🌈 準定跡 (SeedFile): root 局面の記録 PV を置換表に書いてから探索する (手の順序 + PV 以外のノードの打ち切り)。
 #if HASH_KEY_BITS <= 64
+    if (!engine.seed_groups.empty())
+    {
+        int n_g = engine.write_seed_group(tt, rootPos.key());
+        if (n_g > 0 && bool(options["SeedDebug"]))
+            sync_cout << "info string seed: " << n_g << " TT entries written for this root (v2b)" << sync_endl;
+    }
+    if (!engine.seed_nodes.empty() && engine.seed_nodes.size() <= size_t(int(options["SeedRewriteMax"])))
+    {
+        int n_seed2 = engine.write_seed_nodes(tt);
+        if (bool(options["SeedDebug"]))
+            sync_cout << "info string seed: " << n_seed2 << " TT entries rewritten (v2)" << sync_endl;
+    }
     if (!engine.seeds.empty())
     {
         int n_seed = engine.apply_seeds(rootPos, tt);

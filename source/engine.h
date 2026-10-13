@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -168,6 +169,9 @@ public:
     //    "ponderhit"に対してmain_manager()->ponder = false;にするなどの処理が必要である。
     // 🤔 このbool、どう見ても不要なのだが…。
     virtual void set_ponderhit(bool b) = 0;
+
+	// 🌈 準定跡 (shogi-nnue report/57 §17): "seeddump <out> [min_depth] [max_ply] [max_nodes]" 直前の探索の置換表から root 以下の木を書き出す。
+	virtual void seed_dump(std::istringstream& is) { (void)is; }
 
 	// "ucinewgame"に対してWorkerを初期化する。(tt.clear(), threads.clear()を呼び出す)
 	//	🤔 将棋だと"isready"に対するhandlerで処理したほうがいいと思う。
@@ -502,6 +506,7 @@ class EngineWrapper: public IEngine {
     virtual void resize_threads() override { engine->resize_threads(); }
     virtual void set_tt_size(size_t mb) override { engine->set_tt_size(mb); }
     virtual void set_ponderhit(bool b) override { engine->set_ponderhit(b); }
+    virtual void seed_dump(std::istringstream& is) override { engine->seed_dump(is); }   // 🌈 準定跡 (内側の engine に転送)
     virtual void search_clear() override { engine->search_clear(); }
 
     virtual void set_on_update_no_moves(std::function<void(const InfoShort&)>&& f) override final {

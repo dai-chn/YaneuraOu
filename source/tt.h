@@ -186,6 +186,11 @@ public:
       const;  // This is the hash function; its only external use is memory prefetching.
 #else
 	TTEntry* first_entry(const Key& key, Color side_to_move) const;
+
+#if HASH_KEY_BITS <= 64
+	// 🌈 準定跡 (SeedFile v2、shogi-nnue report/57 §17): 局面の key と手番だけで entry を書く (probe と同じ cluster / 置換規則、pv=true、eval=VALUE_NONE)。
+	void seed_write(const Key key, Color stm, Move16 m16, Value v, Depth d, Bound b);
+#endif
 #endif
 
 	static void UnitTest(Test::UnitTester& unittest, IEngine& engine);

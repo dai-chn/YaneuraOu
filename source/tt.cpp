@@ -449,6 +449,25 @@ std::tuple<bool, TTData, TTWriter> TranspositionTable::probe(const Key key, cons
 // keyを元にClusterのindexを求めて、その最初のTTEntry*を返す。内部実装用。
 // ※　ここで渡されるkeyのbit 0は局面の手番フラグ(Position::side_to_move())であると仮定している。
 
+#if HASH_KEY_BITS <= 64
+// 🌈 準定跡 (SeedFile v2): 局面の key と手番だけで entry を書く。probe() の cluster 選択と置換規則をそのまま使う。
+void TranspositionTable::seed_write(const Key key, Color stm, Move16 m16, Value v, Depth d, Bound b) {
+    TTEntry* const tte = first_entry(key, stm);
+    const TTE_KEY_TYPE k = TTE_KEY_TYPE(key);
+    TTEntry* slot = nullptr;
+    for (int i = 0; i < ClusterSize; ++i)
+        if (tte[i].key == k) { slot = &tte[i]; break; }
+    if (!slot)
+    {
+        slot = tte;
+        for (int i = 1; i < ClusterSize; ++i)
+            if (slot->depth8 - 8 * slot->relative_age(generation8) > tte[i].depth8 - 8 * tte[i].relative_age(generation8))
+                slot = &tte[i];
+    }
+    slot->save(k, v, true, b, d, Move(u32(m16.to_u16())), VALUE_NONE, generation8);
+}
+#endif
+
 TTEntry* TranspositionTable::first_entry(const Key& key_, Color side_to_move) const {
 
 #if STOCKFISH

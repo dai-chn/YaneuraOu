@@ -492,3 +492,6 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   TSV (`sfen \t pv(usi) \t value(手番側 cp) \t depth`) を isready で読み (局面 hash → PV)、go の前に root 局面の記録があれば
   PV の各局面に EXACT / 深さ max(1, d0−j) / 値 ±v の置換表 entry を書いてから探索する (定跡として従うのではなく探索の事前分布)。
   定跡 (BookFile) が手を返したときは何もしない。HASH_KEY_BITS > 64 では無効。shogi-nnue report/57 §17。
+- `tt.{h,cpp}` / `engine.h` / `usi.cpp` / `engine/yaneuraou-engine/yaneuraou-search.{h,cpp}` (2026-10-14、準定跡 v2): USI コマンド `seeddump <out.tsv> [min_depth] [max_ply] [max_nodes]`
+  (直前の探索の置換表から現在局面以下の木を DFS で書き出す、`#root` ブロック)、`SeedFile` の v2b 形式 (root ごとの木を go のたびに置換表へ `TranspositionTable::seed_write` で書く)、
+  `SeedRewriteMax`。IEngine に仮想関数 `seed_dump` を追加し EngineWrapper で内側へ転送。既定 (SeedFile 空) では従来と同一。shogi-nnue report/57 §17。
