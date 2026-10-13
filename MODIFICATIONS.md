@@ -493,5 +493,6 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   PV の各局面に EXACT / 深さ max(1, d0−j) / 値 ±v の置換表 entry を書いてから探索する (定跡として従うのではなく探索の事前分布)。
   定跡 (BookFile) が手を返したときは何もしない。HASH_KEY_BITS > 64 では無効。shogi-nnue report/57 §17。
 - `tt.{h,cpp}` / `engine.h` / `usi.cpp` / `engine/yaneuraou-engine/yaneuraou-search.{h,cpp}` (2026-10-14、準定跡 v2): USI コマンド `seeddump <out.tsv> [min_depth] [max_ply] [max_nodes]`
+  - 2026-10-14: `seeddump` の木の切り出しを DFS から best-first (置換表の depth 降順、同点は ply 昇順、`seed_dump_bestfirst`) に変更。DFS は max_nodes で打ち切ると最初の枝だけが深く残り、root 近くを覆えなかった。
   (直前の探索の置換表から現在局面以下の木を DFS で書き出す、`#root` ブロック)、`SeedFile` の v2b 形式 (root ごとの木を go のたびに置換表へ `TranspositionTable::seed_write` で書く)、
   `SeedRewriteMax`。IEngine に仮想関数 `seed_dump` を追加し EngineWrapper で内側へ転送。既定 (SeedFile 空) では従来と同一。shogi-nnue report/57 §17。

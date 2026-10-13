@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <cstdlib>
 #include <deque>
+#include <queue>
 #include <fstream>
 #include <sstream>
 #include "../../book/book.h"
@@ -625,29 +626,56 @@ int YaneuraOuEngine::write_seed_nodes(TranspositionTable& tt_) {
 
 #if HASH_KEY_BITS <= 64
 namespace {
-// root 以下を DFS し、置換表に depth >= min_depth の entry がある局面だけ書き出す (子へは記録した局面からのみ進む)。
-void seed_dump_rec(Position& pos, const TranspositionTable& tt_, std::ofstream& out, int ply, int min_depth, int max_ply, long max_nodes, long& written, long& visited, std::unordered_set<Key>& seen) {
-    if (written >= max_nodes) return;
-    if (!seen.insert(pos.key()).second) return;   // 合流 (transposition) と循環は 1 回だけ
-    ++visited;
-    auto [hit, data, writer] = tt_.probe(pos.key(), pos);
-    if (!hit || data.depth < min_depth) return;
-    if (data.value == VALUE_NONE || std::abs(int(data.value)) >= int(VALUE_MATE_IN_MAX_PLY)) return;
+// 🌈 root 以下を「置換表の depth が深い順」(best-first、同点は ply 昇順) に書き出す。子へは記録した局面からのみ進む。
+// DFS で max_nodes を打ち切ると最初の枝だけが深く残り、新しい探索の上部 (root 近く) を覆えない
+// (2026-10-14: 10 万 node の DFS 記録では depth 26 到達が 1.26 倍しか速くならなかった)。
+// 局面は root からの手順で持ち、取り出すたびに再生する (ply <= max_ply なので安い)。合流 (transposition) と循環は 1 回だけ。
+struct SeedDumpNode { int depth; int ply; std::vector<Move> path; };
+struct SeedDumpLess { bool operator()(const SeedDumpNode& a, const SeedDumpNode& b) const { return a.depth != b.depth ? a.depth < b.depth : a.ply > b.ply; } };
+
+void seed_dump_bestfirst(Position& root, const TranspositionTable& tt_, std::ofstream& out, int min_depth, int max_ply, long max_nodes, long& written, long& visited) {
+    std::priority_queue<SeedDumpNode, std::vector<SeedDumpNode>, SeedDumpLess> pq;
+    std::unordered_set<Key> seen;
     {
-        std::istringstream ss(pos.sfen()); std::string b, t, h; ss >> b >> t >> h;
-        char keybuf[24]; std::snprintf(keybuf, sizeof(keybuf), "%016llx", (unsigned long long)pos.key());
-        out << keybuf << '\t' << b << ' ' << t << ' ' << h << '\t' << (data.move ? to_usi_string(data.move) : std::string("none"))
-            << '\t' << int(data.value) << '\t' << int(data.depth) << '\t' << int(data.bound) << '\n';
-        ++written;
+        auto [hit, data, writer] = tt_.probe(root.key(), root);
+        if (!hit || data.depth < min_depth) return;
+        seen.insert(root.key());
+        pq.push(SeedDumpNode{ int(data.depth), 0, {} });
     }
-    if (ply >= max_ply) return;
-    for (const auto& m : MoveList<LEGAL>(pos))
+    std::deque<StateInfo> sts;
+    while (!pq.empty() && written < max_nodes)
     {
-        StateInfo si;
-        pos.do_move(m, si);
-        seed_dump_rec(pos, tt_, out, ply + 1, min_depth, max_ply, max_nodes, written, visited, seen);
-        pos.undo_move(m);
-        if (written >= max_nodes) return;
+        SeedDumpNode nd = pq.top(); pq.pop();
+        ++visited;
+        sts.clear();
+        for (Move m : nd.path) { sts.emplace_back(); root.do_move(m, sts.back()); }
+        auto [hit, data, writer] = tt_.probe(root.key(), root);
+        if (hit && data.depth >= min_depth && data.value != VALUE_NONE && std::abs(int(data.value)) < int(VALUE_MATE_IN_MAX_PLY))
+        {
+            std::istringstream ss(root.sfen()); std::string b, t, h; ss >> b >> t >> h;
+            char keybuf[24]; std::snprintf(keybuf, sizeof(keybuf), "%016llx", (unsigned long long)root.key());
+            out << keybuf << '\t' << b << ' ' << t << ' ' << h << '\t' << (data.move ? to_usi_string(data.move) : std::string("none"))
+                << '\t' << int(data.value) << '\t' << int(data.depth) << '\t' << int(data.bound) << '\n';
+            ++written;
+            if (nd.ply < max_ply)
+                for (const auto& m : MoveList<LEGAL>(root))
+                {
+                    StateInfo si;
+                    root.do_move(m, si);
+                    if (seen.insert(root.key()).second)
+                    {
+                        auto [h2, d2, w2] = tt_.probe(root.key(), root);
+                        if (h2 && d2.depth >= min_depth)
+                        {
+                            SeedDumpNode c{ int(d2.depth), nd.ply + 1, nd.path };
+                            c.path.push_back(Move(m));
+                            pq.push(std::move(c));
+                        }
+                    }
+                    root.undo_move(m);
+                }
+        }
+        for (auto it = nd.path.rbegin(); it != nd.path.rend(); ++it) root.undo_move(*it);
     }
 }
 }
@@ -669,10 +697,9 @@ void YaneuraOuEngine::seed_dump(std::istringstream& is) {
         out << "#root " << keybuf << ' ' << b << ' ' << t << ' ' << h << '\n';
     }
     long written = 0, visited = 0;
-    std::unordered_set<Key> seen;
-    seed_dump_rec(root, tt, out, 0, min_depth, max_ply, max_nodes, written, visited, seen);
+    seed_dump_bestfirst(root, tt, out, min_depth, max_ply, max_nodes, written, visited);
     out.flush();
-    sync_cout << "info string seeddump: done " << written << " nodes written (visited " << visited << ", min_depth " << min_depth << ", max_ply " << max_ply << ")" << sync_endl;
+    sync_cout << "info string seeddump: done " << written << " nodes written, best-first by depth (visited " << visited << ", min_depth " << min_depth << ", max_ply " << max_ply << ")" << sync_endl;
 #else
     (void)is;
     sync_cout << "info string seeddump: not supported with HASH_KEY_BITS > 64" << sync_endl;
