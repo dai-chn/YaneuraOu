@@ -173,6 +173,12 @@ class TimeManagement {
     int       carry_max_pct      = 50;  // 🌈 TimeCarryMax: carry の上限 (remain_time に対する %)
     TimePoint carry_ms           = 0;   // 🌈 節約して繰り越した時間 [ms] (対局中ずっと保持、clear() でリセット)
     TimePoint base_optimum       = 0;   // 🌈 今回の optimum (繰り越し加算前)。note_search_end() で使う
+    TimePoint carry_bonus        = 0;   // 🌈 今回 optimum/maximum に足した carry の量 (デバッグ表示用)
+    int       carry_hit_pct      = 0;   // 🌈 TimeCarryHitPct : go ponder で init された手 (当たれば hit) に配る carry の %
+    int       carry_miss_pct     = 0;   // 🌈 TimeCarryMissPct: 通常の go (外れ / ponder 無し) の手に配る carry の %。両方 0 なら 1/N (TimeCarrySpread)
+    int       ponder_optimum_bonus = 25;      // 🌈 PonderOptimumBonus: USI_Ponder 時に optimum へ足す % (従来は固定 25)
+    bool      ponderhit_min_from_hit = false; // 🌈 PonderhitMinFromHit: 最低思考時間を ponderhit から数える (相手の即指しにつられない)
+    bool      carry_enabled() const { return carry_spread > 0 || carry_hit_pct > 0 || carry_miss_pct > 0; }
 
 	// TODO : あとで
 #if 0
