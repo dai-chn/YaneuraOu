@@ -16,6 +16,9 @@
 #include "../../position.h"
 #include "../../memory.h"
 #include "../../usi.h"
+#include "../../numa.h"
+#include <mutex>
+#include <cstring>
 
 #if defined(USE_EVAL_HASH)
 #include "../evalhash.h"
@@ -428,6 +431,50 @@ namespace NNUE {
     // NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
     SystemWideSharedConstant<NnueNetworks> shared_networks;
 
+    // 🌈 #97 NUMA 複製 (memory project_multicore_search_infra): 2 ソケット以上の箱で FT 行のフェッチが NUMA 越えにならないよう、
+    //     ノード 1 以降にそれぞれ NnueNetworks のコピーを置き、探索スレッドは自分のノードのコピーを thread_local で指す。ノード 0 は共有コピー。
+    thread_local const NnueNetworks* tl_networks = nullptr;
+    thread_local unsigned tl_networks_generation = 0;
+    unsigned networks_generation = 1;
+    namespace {
+        const NumaConfig* numa_cfg = nullptr;
+        std::vector<LargePagePtr<NnueNetworks>> numa_copies;   // index = NUMA node (0 は共有コピーを使うので空のまま)
+        std::mutex numa_copies_mutex;
+        bool networks_loaded = false;   // 評価関数の読込前 (isready 前の Threads/NumaPolicy 設定) は複製しない
+    }
+    void set_numa_config(const NumaConfig* cfg) {
+        std::lock_guard<std::mutex> lk(numa_copies_mutex);
+        if (cfg != numa_cfg || (cfg != nullptr && numa_copies.size() != cfg->num_numa_nodes()))
+            numa_copies.clear();
+        numa_cfg = cfg;
+    }
+    void drop_numa_networks() {
+        std::lock_guard<std::mutex> lk(numa_copies_mutex);
+        numa_copies.clear();
+        ++networks_generation;
+    }
+    void bind_networks_to_numa(const NumaReplicatedAccessToken& token) {
+        const NumaIndex idx = token.get_numa_index();
+        if (!networks_loaded || numa_cfg == nullptr || numa_cfg->num_numa_nodes() <= 1 || idx == 0) { tl_networks = nullptr; return; }
+        std::lock_guard<std::mutex> lk(numa_copies_mutex);
+        if (numa_copies.size() < numa_cfg->num_numa_nodes())
+            numa_copies.resize(numa_cfg->num_numa_nodes());
+        if (!numa_copies[idx])
+        {
+            const NnueNetworks& src = *shared_networks;
+            LargePagePtr<NnueNetworks> copy;
+            // そのノードに bind したスレッドで確保 + コピー (= first touch でそのノードの物理メモリに載る)
+            numa_cfg->execute_on_numa_node(idx, [&] { copy = make_unique_large_page<NnueNetworks>(src); });
+            const bool same = copy && std::memcmp(copy.get(), &src, sizeof(NnueNetworks)) == 0;
+            sync_cout << "info string NNUE weights replicated to NUMA node " << idx << " (" << (sizeof(NnueNetworks) >> 20) << " MB, "
+                      << (same ? "verified" : "MISMATCH") << ")" << sync_endl;
+            if (!same) { tl_networks = nullptr; return; }
+            numa_copies[idx] = std::move(copy);
+        }
+        tl_networks = numa_copies[idx].get();
+        tl_networks_generation = networks_generation;
+    }
+
     // 評価関数ファイル名
     const char* const kFileName = EvalFileDefaultName;
 
@@ -542,6 +589,8 @@ namespace {
 
 		// 共有メモリに配置（同一ハッシュの共有メモリが既に存在すればそちらを参照）
 		shared_networks = SystemWideSharedConstant<NnueNetworks>(*tmp);
+		drop_numa_networks();   // 🌈 #97 古い NUMA コピーを捨てる (次の bind で作り直す)
+		networks_loaded = true;
 
 		auto status = shared_networks.get_status();
 		if (status == SystemWideSharedConstantAllocationStatus::SharedMemory)

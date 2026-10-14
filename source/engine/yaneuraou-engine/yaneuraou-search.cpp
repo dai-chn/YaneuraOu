@@ -25,6 +25,9 @@
 #include "../../thread.h"
 #include "../../misc.h"
 #include "../../tt.h"
+#if defined(EVAL_NNUE)
+#include "../../eval/nnue/evaluate_nnue.h"   // 🌈 #97 NUMA 複製 (bind_networks_to_numa)
+#endif
 #include <algorithm>
 #include <unordered_set>
 #include <cstdlib>
@@ -778,6 +781,9 @@ void YaneuraOuEngine::resize_threads() {
     // 📌 NUMAの設定
 
     // スレッドの用いる評価関数パラメーターが正しいNUMAに属するようにする
+#if defined(EVAL_NNUE)
+    Eval::NNUE::set_numa_config(&numaContext.get_numa_config());   // 🌈 #97
+#endif
     threads.ensure_network_replicated();
 }
 
@@ -1125,12 +1131,10 @@ Search::YaneuraOuWorker::YaneuraOuWorker(SharedState& sharedState,
 }
 
 void Search::YaneuraOuWorker::ensure_network_replicated() {
-	// TODO : あとで評価関数を実装する。
-	#if 0
-    // Access once to force lazy initialization.
-    // We do this because we want to avoid initialization during search.
-    (void) (networks[numaAccessToken]);
-	#endif
+	// 🌈 #97: NNUE 重みをこのスレッドの NUMA ノードのコピーに結び付ける (無ければ作る)。1 ノード構成なら共有コピーのまま。
+#if defined(EVAL_NNUE)
+	Eval::NNUE::bind_networks_to_numa(numaAccessToken);
+#endif
 }
 
 void Search::YaneuraOuWorker::pre_start_searching() {

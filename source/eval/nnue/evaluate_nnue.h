@@ -15,6 +15,8 @@
 #include "../../shm.h"
 
 namespace YaneuraOu {
+class NumaConfig;
+class NumaReplicatedAccessToken;
 namespace Eval::NNUE {
 
 	#define EvalFileDefaultName "nn.bin"
@@ -43,9 +45,21 @@ namespace Eval::NNUE {
 	// NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
 	extern SystemWideSharedConstant<NnueNetworks> shared_networks;
 
-	// 共有メモリ上のNnueNetworksへのconst参照を返すヘルパー。
-	// 評価関数の呼び出しで毎回使われるので、インライン化する。
-	inline const NnueNetworks& networks() { return *shared_networks; }
+	// 🌈 #97 NUMA 複製: 探索スレッドは自分の NUMA ノード上のコピーを thread_local で指す (bind_networks_to_numa)。
+	//     指していない (メインスレッド、1 ノード構成、再読込直後) なら共有メモリのコピー。generation は評価関数の再読込で増え、
+	//     古いコピーを指したままのスレッドが共有コピーへ落ちるようにする (ポインタ比較 + 世代比較だけなので評価のたびに呼んでも軽い)。
+	extern thread_local const NnueNetworks* tl_networks;
+	extern thread_local unsigned tl_networks_generation;
+	extern unsigned networks_generation;
+	inline const NnueNetworks& networks() {
+		return (tl_networks != nullptr && tl_networks_generation == networks_generation) ? *tl_networks : *shared_networks;
+	}
+	// NumaConfig を登録する (resize_threads から。ノード数が変われば古いコピーは捨てる)。nullptr なら複製しない。
+	void set_numa_config(const NumaConfig* cfg);
+	// このスレッドを token のノードのコピーに結び付ける (無ければそのノード上で確保して作る)。Worker::ensure_network_replicated() から呼ぶ。
+	void bind_networks_to_numa(const NumaReplicatedAccessToken& token);
+	// コピーを全部捨てる (評価関数の再読込)。
+	void drop_numa_networks();
 
 	// 評価関数ファイル名
 	extern const char* const kFileName;

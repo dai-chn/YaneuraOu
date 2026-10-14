@@ -497,3 +497,5 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   - 2026-10-14: `seeddump` の木の切り出しを DFS から best-first (置換表の depth 降順、同点は ply 昇順、`seed_dump_bestfirst`) に変更。DFS は max_nodes で打ち切ると最初の枝だけが深く残り、root 近くを覆えなかった。
   (直前の探索の置換表から現在局面以下の木を DFS で書き出す、`#root` ブロック)、`SeedFile` の v2b 形式 (root ごとの木を go のたびに置換表へ `TranspositionTable::seed_write` で書く)、
   `SeedRewriteMax`。IEngine に仮想関数 `seed_dump` を追加し EngineWrapper で内側へ転送。既定 (SeedFile 空) では従来と同一。shogi-nnue report/57 §17。
+
+- 2026-10-14 (#97 多コア): NNUE 重みの NUMA 複製。`Eval::NNUE::networks()` を thread_local のノード別コピー経由にし (`bind_networks_to_numa` / `set_numa_config` / `drop_numa_networks`、`evaluate_nnue.{h,cpp}`)、`Search::YaneuraOuWorker::ensure_network_replicated()` で各探索スレッドを自分のノードのコピーに結び付ける (ノード 0 は共有メモリのコピー、ノード 1 以降は `execute_on_numa_node` で bind したスレッドが確保 + memcpy)。`resize_threads()` で NumaConfig を登録、評価関数の再読込でコピーを捨てる。
