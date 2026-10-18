@@ -14,17 +14,51 @@
 #include "../../memory.h"
 #include "../../shm.h"
 
+#if defined(SFNNwoPSQT)
+#ifndef NNUE_SFNN_HAND_BUCKETS
+#define NNUE_SFNN_HAND_BUCKETS 1
+#endif
+#ifndef NNUE_SFNN_KING_BUCKETS
+#define NNUE_SFNN_KING_BUCKETS 9
+#endif
+#ifndef NNUE_SFNN_PROGRESS_BUCKETS
+#define NNUE_SFNN_PROGRESS_BUCKETS 1
+#endif
+#endif
+
 namespace YaneuraOu {
 class NumaConfig;
 class NumaReplicatedAccessToken;
+class Position;
+
 namespace Eval::NNUE {
 
 	#define EvalFileDefaultName "nn.bin"
 
+#if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
+namespace Progress {
+
+	// SFNNのLayerStack選択に使う進行度計算パラメーター。
+	// EvalDir/progress.bin: headerless little-endian doubles, without bias.
+	struct Parameters {
+		static constexpr int kWeightCount = int(SQ_NB) * int(Eval::fe_end);
+
+		Tools::Result ReadParameters(std::istream& stream);
+
+		std::int64_t SumQ16(const Position& pos) const;
+		int BucketIndex(const Position& pos, int bucket_count) const;
+
+		std::int32_t weights_q16_[SQ_NB][Eval::fe_end] = {};
+	};
+
+} // namespace Progress
+#endif
+
 	// Hash value of evaluation function structure
 	// 評価関数の構造のハッシュ値
 #if defined(SFNNwoPSQT)
-	constexpr std::uint32_t kHashValue = 0x3c203b32u;
+	constexpr std::uint32_t kSfnnBaseHashValue = 0x3c203b32u;
+	constexpr std::uint32_t kHashValue = kSfnnBaseHashValue;
 	constexpr int kLayerStacks = LayerStacks;
 #else
 	constexpr std::uint32_t kHashValue =
@@ -37,6 +71,9 @@ namespace Eval::NNUE {
 	// プロセス間共有メモリに直接配置できる。
 	struct NnueNetworks {
 		FeatureTransformer feature_transformer;
+#if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
+		Progress::Parameters progress;
+#endif
 		Network network[kLayerStacks];
 	};
 	static_assert(std::is_trivially_copyable_v<NnueNetworks>,
@@ -76,7 +113,8 @@ namespace Eval::NNUE {
 	    std::uint32_t hash_value, const std::string& architecture);
 
 	// 評価関数パラメータを読み込む
-	Tools::Result ReadParameters(std::istream& stream);
+	// On a sidecar read failure, replace failed_file with its path.
+	Tools::Result ReadParameters(std::istream& stream, std::string* failed_file = nullptr);
 
 	// 評価関数パラメータを書き込む
 	bool WriteParameters(std::ostream& stream);

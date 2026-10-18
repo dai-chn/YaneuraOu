@@ -500,3 +500,9 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
 
 - 2026-10-14 (#97 多コア): NNUE 重みの NUMA 複製。`Eval::NNUE::networks()` を thread_local のノード別コピー経由にし (`bind_networks_to_numa` / `set_numa_config` / `drop_numa_networks`、`evaluate_nnue.{h,cpp}`)、`Search::YaneuraOuWorker::ensure_network_replicated()` で各探索スレッドを自分のノードのコピーに結び付ける (ノード 0 は共有メモリのコピー、ノード 1 以降は `execute_on_numa_node` で bind したスレッドが確保 + memcpy)。`resize_threads()` で NumaConfig を登録、評価関数の再読込でコピーを捨てる。
 - 2026-10-18 (#97): USI オプション `NumaReplicateNNUE` (既定 true) を追加。false なら NNUE 重みを複製せず 1 コピーを全ノードで共有する (本家と同じ挙動)。箱での複製あり/なしの NPS 比較用。判定はスレッド生成時。
+- `eval/nnue/evaluate_nnue.cpp` / `eval/nnue/evaluate_nnue.h` / `position.h` / `eval/nnue/architectures/nnue_arch_gen.py` (2026-10-08、branch search-port-980):
+  本家やねうら王 9.80git の進行度 (progress) bucket (commit 9a0df6a5 / e47d460f / c1b80eaa) を cherry-pick で取り込み。
+  SFNN の layer stack を「玉位置 bucket × 進行度 bucket (KP 絶対の logistic 回帰、EvalDir/progress.bin = ヘッダ無し double × 81 × 1548)」で選ぶ。
+  本 fork 固有の変更点: 生成器の legacy 接尾辞 `ls<K>[p<P>]` (例 `ls9` = 従来 k3k3、`ls9p8` = k3k3 × progress8 = 72 stacks) を追加、
+  lazy threat / nnuedump との共存 (`#if` の入れ子)。`ls9` (progress 1) では評価値・探索は従来と同一 (固定ノード 20 局面で bestmove/score 一致)。
+- 2026-10-18: branch `dr7-integrate` = 本 fork (shogi-nnue) の HEAD 6653f9ac に `search-port-980` (進行度 bucket) を merge。衝突は evaluate_nnue.h の前方宣言と本ファイルだけ (両方を残した)。

@@ -4,7 +4,12 @@
 
 #if defined(EVAL_NNUE)
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -25,6 +30,7 @@
 #endif
 
 #include "evaluate_nnue.h"
+#include "nnue_common.h"
 
 namespace YaneuraOu::Eval::NNUE {
 extern int FV_SCALE;
@@ -427,6 +433,100 @@ namespace NNUE {
 	int LAZY_THREAT_MODE = 0;
 	int LAZY_THREAT_MARGIN = 200;   // [cp]
 #endif
+#if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
+namespace Progress {
+namespace {
+
+	constexpr double kQ16Scale = 65536.0;
+	constexpr int kProgressThresholdCount = NNUE_SFNN_PROGRESS_BUCKETS - 1;
+
+	std::array<std::int64_t, kProgressThresholdCount> make_thresholds_q16() {
+		std::array<std::int64_t, kProgressThresholdCount> thresholds{};
+		for (int i = 1; i < NNUE_SFNN_PROGRESS_BUCKETS; ++i) {
+			const double p = double(i) / double(NNUE_SFNN_PROGRESS_BUCKETS);
+			const double scaled = std::round(std::log(p / (1.0 - p)) * kQ16Scale);
+			const double clamped = std::clamp(
+			    scaled,
+			    double((std::numeric_limits<std::int64_t>::min)()),
+			    double((std::numeric_limits<std::int64_t>::max)()));
+			thresholds[i - 1] = std::int64_t(clamped);
+		}
+		return thresholds;
+	}
+
+	const std::array<std::int64_t, kProgressThresholdCount>& thresholds_q16() {
+		static const auto thresholds = make_thresholds_q16();
+		return thresholds;
+	}
+
+	int bucket_from_sum_q16(std::int64_t sum_q16) {
+		const auto& thresholds = thresholds_q16();
+		const auto it = std::upper_bound(thresholds.begin(), thresholds.end(), sum_q16);
+		return int(it - thresholds.begin());
+	}
+
+} // namespace
+
+Tools::Result Parameters::ReadParameters(std::istream& stream) {
+	static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
+	static_assert(kWeightCount == 81 * 1548);
+	for (auto& row : weights_q16_)
+		for (auto& weight : row) {
+			const auto bits = read_little_endian<std::uint64_t>(stream);
+			if (stream.fail()) return Tools::ResultCode::FileReadError;
+			double value;
+			std::memcpy(&value, &bits, sizeof(value));
+			// Check the IEEE exponent directly, also with -ffast-math enabled.
+			if ((bits & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL)
+				return Tools::ResultCode::FileMismatch;
+			weight = std::int32_t(std::clamp(std::round(value * kQ16Scale),
+			    double((std::numeric_limits<std::int32_t>::min)()),
+			    double((std::numeric_limits<std::int32_t>::max)())));
+		}
+	return stream.peek() == std::ios::traits_type::eof()
+	    ? Tools::ResultCode::Ok : Tools::ResultCode::FileMismatch;
+}
+
+std::int64_t Parameters::SumQ16(const Position& pos) const {
+	const auto sq_bk = pos.square<KING>(BLACK);
+	const auto sq_wk = Inv(pos.square<KING>(WHITE));
+
+	auto* st = pos.state();
+	std::int64_t sum_q16 = 0;
+	if (st->nnue_progress_valid
+	    && st->nnue_progress_key == pos.key()
+	    && st->nnue_progress_sq_bk == sq_bk
+	    && st->nnue_progress_sq_wk == sq_wk) {
+		sum_q16 = st->nnue_progress_sum;
+	} else {
+		const auto& list0 = pos.eval_list()->piece_list_fb();
+		const auto& list1 = pos.eval_list()->piece_list_fw();
+
+		for (int i = 0; i < PIECE_NUMBER_KING; ++i) {
+			sum_q16 += weights_q16_[sq_bk][list0[i]];
+			sum_q16 += weights_q16_[sq_wk][list1[i]];
+		}
+
+		st->nnue_progress_key = pos.key();
+		st->nnue_progress_sum = sum_q16;
+		st->nnue_progress_sq_bk = sq_bk;
+		st->nnue_progress_sq_wk = sq_wk;
+		st->nnue_progress_valid = true;
+	}
+
+	return sum_q16;
+}
+
+int Parameters::BucketIndex(const Position& pos, int bucket_count) const {
+	if (bucket_count <= 1)
+		return 0;
+
+	ASSERT_LV1(bucket_count == NNUE_SFNN_PROGRESS_BUCKETS);
+	return bucket_from_sum_q16(SumQ16(pos));
+}
+
+} // namespace Progress
+#endif
 
     // NNUE評価関数パラメーター（共有メモリまたはローカルメモリ上に配置）
     SystemWideSharedConstant<NnueNetworks> shared_networks;
@@ -534,7 +634,7 @@ namespace {
 
 	// テンポラリにパラメータを読み込み、共有メモリに配置する。
 	// 同じパラメータを持つ他プロセスが既に共有メモリを作成済みなら、そちらを参照する。
-	Tools::Result LoadAndShare(std::istream& stream) {
+	Tools::Result LoadAndShare(std::istream& stream, [[maybe_unused]] std::string* failed_file) {
 		// テンポラリ領域にパラメータを読み込む
 		auto tmp = make_unique_large_page<NnueNetworks>();
 
@@ -576,6 +676,22 @@ namespace {
 			sync_cout << "info string NNUE feature params read failed: " << result.to_string() << sync_endl;
 			return result;
 		}
+#if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
+		const std::string eval_dir = Options["EvalDir"];
+		const auto progress_path = Path::Combine(
+		    Path::Combine(Directory::GetBinaryFolder(), eval_dir), "progress.bin");
+		std::ifstream progress_stream(progress_path, std::ios::binary);
+		sync_cout << "info string loading progress file : " << progress_path << sync_endl;
+		result = progress_stream.is_open()
+		    ? tmp->progress.ReadParameters(progress_stream)
+		    : Tools::Result(Tools::ResultCode::FileNotFound);
+		if (result.is_not_ok()) {
+			if (failed_file) *failed_file = progress_path;
+			sync_cout << "info string NNUE progress params read failed: " << progress_path
+			          << " : " << result.to_string() << sync_endl;
+			return result;
+		}
+#endif
 		for (int i = 0; i < kLayerStacks; ++i) {
 			result = Detail::ReadParameters<Network>(stream, tmp->network[i]);
 			if (result.is_not_ok()) {
@@ -634,9 +750,9 @@ namespace {
     }
 
     	// 評価関数パラメータを読み込む
-    	Tools::Result ReadParameters(std::istream& stream) {
-    		return LoadAndShare(stream);
-    	}
+    Tools::Result ReadParameters(std::istream& stream, std::string* failed_file) {
+        return LoadAndShare(stream, failed_file);
+    }
     // 評価関数パラメータを書き込む
     bool WriteParameters(std::ostream& stream) {
         if (!WriteHeader(stream, kHashValue, GetArchitectureString())) return false;
@@ -737,19 +853,196 @@ namespace {
 #endif
 
 #if defined(SFNNwoPSQT)
+    static_assert(NNUE_SFNN_HAND_BUCKETS == 1 || NNUE_SFNN_HAND_BUCKETS == 64
+        || NNUE_SFNN_HAND_BUCKETS == 256 || NNUE_SFNN_HAND_BUCKETS == 1024,
+        "unsupported NNUE_SFNN_HAND_BUCKETS");
+    static_assert(NNUE_SFNN_KING_BUCKETS == 1 || NNUE_SFNN_KING_BUCKETS == 9
+        || NNUE_SFNN_KING_BUCKETS == 81 || NNUE_SFNN_KING_BUCKETS == 441
+        || NNUE_SFNN_KING_BUCKETS == 841,
+        "unsupported NNUE_SFNN_KING_BUCKETS");
+    static_assert(NNUE_SFNN_PROGRESS_BUCKETS == 1 || NNUE_SFNN_PROGRESS_BUCKETS == 2
+        || NNUE_SFNN_PROGRESS_BUCKETS == 3 || NNUE_SFNN_PROGRESS_BUCKETS == 4
+        || NNUE_SFNN_PROGRESS_BUCKETS == 8 || NNUE_SFNN_PROGRESS_BUCKETS == 16
+        || NNUE_SFNN_PROGRESS_BUCKETS == 32,
+        "unsupported NNUE_SFNN_PROGRESS_BUCKETS");
+    static_assert(kLayerStacks == NNUE_SFNN_HAND_BUCKETS * NNUE_SFNN_KING_BUCKETS * NNUE_SFNN_PROGRESS_BUCKETS,
+        "LayerStacks must match the SFNN bucket product");
+
     // レイヤースタックの選択。双方の玉の段に応じて9通りに分岐させる。
-    static int stack_index_for_nnue(const Position& pos) {
-        constexpr int kFToIndex[] = { 0, 0, 0, 3, 3, 3, 6, 6, 6 };
-        constexpr int kEToIndex[] = { 0, 0, 0, 1, 1, 1, 2, 2, 2 };
+    static int king3_by_king3_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        int f_rank = int(pos.square<KING>(stm)) % 9;
+        int e_rank = int(pos.square<KING>(~stm)) % 9;
+
+        if (stm == BLACK)
+            e_rank = 8 - e_rank;
+        else
+            f_rank = 8 - f_rank;
+
+        return (f_rank / 3) * 3 + e_rank / 3;
+    }
+
+    // レイヤースタックの選択。双方の玉の段に応じて81通りに分岐させる。
+    static int king9_by_king9_bucket(const Position& pos) {
         const auto stm = pos.side_to_move();
         const auto f_king = pos.square<KING>(stm);
         const auto e_king = pos.square<KING>(~stm);
-        const auto f_rank = stm == BLACK ? rank_of(f_king) : rank_of(Inv(f_king));
-        const auto e_rank = stm == BLACK ? rank_of(Inv(e_king)) : rank_of(e_king);
-        int idx = kFToIndex[f_rank] + kEToIndex[e_rank];
+        int f_rank = int(stm == BLACK ? rank_of(f_king) : rank_of(Inv(f_king)));
+        int e_rank = int(stm == BLACK ? rank_of(Inv(e_king)) : rank_of(e_king));
+        if (f_rank < 0) f_rank = 0;
+        if (f_rank > 8) f_rank = 8;
+        if (e_rank < 0) e_rank = 0;
+        if (e_rank > 8) e_rank = 8;
+        return f_rank * 9 + e_rank;
+    }
+
+    static int king21_single_bucket(Square sq) {
+        int rank = int(rank_of(sq));
+        int file = int(file_of(sq));
+        if (rank < 0) rank = 0;
+        if (rank > 8) rank = 8;
+        if (file < 0) file = 0;
+        if (file > 8) file = 8;
+
+        if (rank < 3) return 0;
+        if (rank < 6) return 1;
+        if (rank == 6) return 2;
+        return 3 + (rank - 7) * 9 + file;
+    }
+
+    // レイヤースタックの選択。玉1つを21通りに分け、双方の玉で441通りに分岐させる。
+    static int king21_by_king21_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        const auto f_king = pos.square<KING>(stm);
+        const auto e_king = pos.square<KING>(~stm);
+        const auto f_sq = stm == BLACK ? f_king : Inv(f_king);
+        const auto e_sq = stm == BLACK ? Inv(e_king) : e_king;
+        return king21_single_bucket(f_sq) * 21 + king21_single_bucket(e_sq);
+    }
+
+    static int king29_single_bucket(Square sq) {
+        int rank = int(rank_of(sq));
+        int file = int(file_of(sq));
+        if (rank < 0) rank = 0;
+        if (rank > 8) rank = 8;
+        if (file < 0) file = 0;
+        if (file > 8) file = 8;
+
+        if (rank < 3) return 0;
+        if (rank < 6) return 1;
+        return 2 + (rank - 6) * 9 + file;
+    }
+
+    // レイヤースタックの選択。玉1つを29通りに分け、双方の玉で841通りに分岐させる。
+    static int king29_by_king29_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        const auto f_king = pos.square<KING>(stm);
+        const auto e_king = pos.square<KING>(~stm);
+        const auto f_sq = stm == BLACK ? f_king : Inv(f_king);
+        const auto e_sq = stm == BLACK ? Inv(e_king) : e_king;
+        return king29_single_bucket(f_sq) * 29 + king29_single_bucket(e_sq);
+    }
+
+    static int hand64_single_bucket(Hand hand) {
+        const int score =
+              hand_count(hand, PAWN)
+            + (hand_count(hand, LANCE) + hand_count(hand, KNIGHT)) * 2
+            + (hand_count(hand, SILVER) + hand_count(hand, GOLD)) * 3
+            + (hand_count(hand, BISHOP) + hand_count(hand, ROOK)) * 5;
+
+        int bucket = (score + 3) / 4;
+        if (bucket < 0) bucket = 0;
+        if (bucket > 7) bucket = 7;
+        return bucket;
+    }
+
+    static int hand256_single_bucket(Hand hand) {
+        int bucket = 0;
+        if (hand_count(hand, PAWN) + hand_count(hand, LANCE) + hand_count(hand, KNIGHT) > 0)
+            bucket |= 1;
+        if (hand_count(hand, SILVER) + hand_count(hand, GOLD) > 0)
+            bucket |= 2;
+        if (hand_count(hand, BISHOP) > 0)
+            bucket |= 4;
+        if (hand_count(hand, ROOK) > 0)
+            bucket |= 8;
+        return bucket;
+    }
+
+    static int hand1024_single_bucket(Hand hand) {
+        int bucket = 0;
+        if (hand_count(hand, PAWN) > 0)
+            bucket |= 1;
+        if (hand_count(hand, LANCE) + hand_count(hand, KNIGHT) > 0)
+            bucket |= 2;
+        if (hand_count(hand, SILVER) + hand_count(hand, GOLD) > 0)
+            bucket |= 4;
+        if (hand_count(hand, BISHOP) > 0)
+            bucket |= 8;
+        if (hand_count(hand, ROOK) > 0)
+            bucket |= 16;
+        return bucket;
+    }
+
+    // 手番側/非手番側の手駒点を8段階ずつに分け、64通りに分岐させる。
+    static int hand64_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        return hand64_single_bucket(pos.hand_of(stm)) * 8
+            + hand64_single_bucket(pos.hand_of(~stm));
+    }
+
+    static int hand256_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        return hand256_single_bucket(pos.hand_of(stm)) * 16
+            + hand256_single_bucket(pos.hand_of(~stm));
+    }
+
+    static int hand1024_bucket(const Position& pos) {
+        const auto stm = pos.side_to_move();
+        return hand1024_single_bucket(pos.hand_of(stm)) * 32
+            + hand1024_single_bucket(pos.hand_of(~stm));
+    }
+
+    static int progress_bucket(const Position& pos) {
+#if NNUE_SFNN_PROGRESS_BUCKETS == 1
+        return 0;
+#else
+        return networks().progress.BucketIndex(pos, NNUE_SFNN_PROGRESS_BUCKETS);
+#endif
+    }
+
+    static int stack_index_for_nnue(const Position& pos) {
+#if NNUE_SFNN_HAND_BUCKETS == 1 && NNUE_SFNN_KING_BUCKETS == 9 && NNUE_SFNN_PROGRESS_BUCKETS == 1
+        return king3_by_king3_bucket(pos);
+#else
+        int idx = 0;
+
+#if NNUE_SFNN_HAND_BUCKETS == 64
+        idx = hand64_bucket(pos);
+#elif NNUE_SFNN_HAND_BUCKETS == 256
+        idx = hand256_bucket(pos);
+#elif NNUE_SFNN_HAND_BUCKETS == 1024
+        idx = hand1024_bucket(pos);
+#endif
+
+#if NNUE_SFNN_KING_BUCKETS == 9
+        idx = idx * 9 + king3_by_king3_bucket(pos);
+#elif NNUE_SFNN_KING_BUCKETS == 81
+        idx = idx * 81 + king9_by_king9_bucket(pos);
+#elif NNUE_SFNN_KING_BUCKETS == 441
+        idx = idx * 441 + king21_by_king21_bucket(pos);
+#elif NNUE_SFNN_KING_BUCKETS == 841
+        idx = idx * 841 + king29_by_king29_bucket(pos);
+#endif
+
+#if NNUE_SFNN_PROGRESS_BUCKETS != 1
+        idx = idx * NNUE_SFNN_PROGRESS_BUCKETS + progress_bucket(pos);
+#endif
+
         if (idx < 0) idx = 0;
         if (idx >= kLayerStacks) idx = kLayerStacks - 1;
         return idx;
+#endif
     }
 #endif
 
@@ -900,6 +1193,7 @@ void load_eval() {
 		// WASM
         const std::string file_name = Options["EvalFile"];
     #endif
+        std::string failed_file = file_name;
         const Tools::Result result = [&] {
             if (dir_name != "<internal>") {
 #if defined(_WIN32)
@@ -923,11 +1217,12 @@ void load_eval() {
 #else
                 auto abs_eval_path = Path::Combine(Directory::GetBinaryFolder(), dir_name);
                 const std::string file_path = Path::Combine(abs_eval_path, file_name);
+                failed_file = file_path;
                 std::ifstream stream(file_path, std::ios::binary);
                 sync_cout << "info string loading eval file : " << file_path << sync_endl;
                 if (!stream.is_open())
                     return Tools::Result(Tools::ResultCode::FileNotFound);
-                return NNUE::ReadParameters(stream);
+                return NNUE::ReadParameters(stream, &failed_file);
 #endif
             }
             else {
@@ -948,7 +1243,7 @@ void load_eval() {
                 std::istream stream(&buffer);
                 sync_cout << "info string loading eval file : <internal>" << sync_endl;
 
-                return NNUE::ReadParameters(stream);
+                return NNUE::ReadParameters(stream, &failed_file);
             }
         }();
 
@@ -957,7 +1252,7 @@ void load_eval() {
         if (result.is_not_ok())
         {
             // 読み込みエラーのとき終了してくれないと困る。
-            sync_cout << "Error! : failed to read " << file_name << " : " << result.to_string() << sync_endl;
+            sync_cout << "Error! : failed to read " << failed_file << " : " << result.to_string() << sync_endl;
             Tools::exit();
         }
 
