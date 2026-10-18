@@ -499,3 +499,4 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   `SeedRewriteMax`。IEngine に仮想関数 `seed_dump` を追加し EngineWrapper で内側へ転送。既定 (SeedFile 空) では従来と同一。shogi-nnue report/57 §17。
 
 - 2026-10-14 (#97 多コア): NNUE 重みの NUMA 複製。`Eval::NNUE::networks()` を thread_local のノード別コピー経由にし (`bind_networks_to_numa` / `set_numa_config` / `drop_numa_networks`、`evaluate_nnue.{h,cpp}`)、`Search::YaneuraOuWorker::ensure_network_replicated()` で各探索スレッドを自分のノードのコピーに結び付ける (ノード 0 は共有メモリのコピー、ノード 1 以降は `execute_on_numa_node` で bind したスレッドが確保 + memcpy)。`resize_threads()` で NumaConfig を登録、評価関数の再読込でコピーを捨てる。
+- 2026-10-18 (#97): USI オプション `NumaReplicateNNUE` (既定 true) を追加。false なら NNUE 重みを複製せず 1 コピーを全ノードで共有する (本家と同じ挙動)。箱での複製あり/なしの NPS 比較用。判定はスレッド生成時。

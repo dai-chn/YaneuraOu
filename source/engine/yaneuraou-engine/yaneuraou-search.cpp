@@ -337,6 +337,8 @@ void YaneuraOuEngine::add_options() {
     options.add("SeedFile", Option(""));
     options.add("SeedDebug", Option(false));
     options.add("SeedRewriteMax", Option(300000, 0, 100000000));   // v2 の node 数がこれ以下なら go のたびに TT へ書き戻す
+    // 🌈 #97: NNUE 重みを NUMA ノードごとに複製するか (既定 true)。false = 1 コピーを全ノードで共有 (本家と同じ)。比較計測用。
+    options.add("NumaReplicateNNUE", Option(true));
 
     options.add("DrawValueBlack", Option(-2, -30000, 30000));
     options.add("DrawValueWhite", Option(-2, -30000, 30000));
@@ -1133,7 +1135,10 @@ Search::YaneuraOuWorker::YaneuraOuWorker(SharedState& sharedState,
 void Search::YaneuraOuWorker::ensure_network_replicated() {
 	// 🌈 #97: NNUE 重みをこのスレッドの NUMA ノードのコピーに結び付ける (無ければ作る)。1 ノード構成なら共有コピーのまま。
 #if defined(EVAL_NNUE)
-	Eval::NNUE::bind_networks_to_numa(numaAccessToken);
+	// NumaReplicateNNUE = false なら複製せず共有コピーを読む (箱での複製あり/なしの NPS 比較用、#97)。
+	// 判定はスレッド生成時 (resize_threads) なので、切り替えは別プロセスで、または Threads を変えて isready し直すこと。
+	if (bool(options["NumaReplicateNNUE"]))
+		Eval::NNUE::bind_networks_to_numa(numaAccessToken);
 #endif
 }
 
