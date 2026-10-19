@@ -506,3 +506,4 @@ SEE margin / singular extension / IIR の各定数 **32 個**を `TUNABLE_PARAM`
   本 fork 固有の変更点: 生成器の legacy 接尾辞 `ls<K>[p<P>]` (例 `ls9` = 従来 k3k3、`ls9p8` = k3k3 × progress8 = 72 stacks) を追加、
   lazy threat / nnuedump との共存 (`#if` の入れ子)。`ls9` (progress 1) では評価値・探索は従来と同一 (固定ノード 20 局面で bestmove/score 一致)。
 - 2026-10-18: branch `dr7-integrate` = 本 fork (shogi-nnue) の HEAD 6653f9ac に `search-port-980` (進行度 bucket) を merge。衝突は evaluate_nnue.h の前方宣言と本ファイルだけ (両方を残した)。
+- 2026-10-19 (#96): `timeman.{h,cpp}` / `engine/yaneuraou-engine/yaneuraou-search.cpp`: USI オプション `TimeDynamicGamma` (既定 100) / `TimeDynamicPivot` (既定 100)。反復深化の停止判定で optimum に掛ける動的係数の積 m (fallingEval × reduction × bestMoveInstability × highBestMoveEffort) を pivot × (m / pivot)^(gamma/100) に置き換える (`TimeManagement::dynamic_shape`)。既定値では m そのまま。shogi-nnue report/59 §15.5。

@@ -2349,8 +2349,9 @@ bool Search::YaneuraOuWorker::iterative_deepening() {
             double bestMoveInstability = 1.04 + 1.8956 * totBestMoveChanges / threads.size();
 			double highBestMoveEffort  = completedDepth >= 10 && nodesEffort >= 92425 ? 0.666 : 1.0;
 
-            double totalTime = mainThread->tm.optimum() * fallingEval * reduction
-                             * bestMoveInstability * highBestMoveEffort;
+            // 🌈 10-19 (report/59 §15.5): 積の振れ幅を TimeDynamicGamma / TimeDynamicPivot で変えられるように (既定 100 = 従来と同じ計算)
+            double totalTime = mainThread->tm.optimum()
+                             * mainThread->tm.dynamic_shape(fallingEval * reduction * bestMoveInstability * highBestMoveEffort);
             // 🌈 #96 時間配分: |e| が大きい局面の硬い下限 (TimeAllocBigFloor)。動的係数で下限より早く止まらないようにする。
             totalTime = std::max(totalTime, double(mainThread->tm.hard_minimum()));
 
