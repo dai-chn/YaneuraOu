@@ -75,6 +75,11 @@ void TimeManagement::add_options(OptionsMap& options) {
     options.add("TimeCarryMissPct", Option(0, 0, 100));    // 通常の go (外れ / ponder 無し) の手に carry の何 % を足すか
     options.add("PonderhitMinFromHit", false);             // true: 最低思考時間 (MinimumThinkingTime − NetworkDelay) を ponderhit から数える (floor 課金なら無料)
     options.add("PonderOptimumBonus", Option(25, 0, 100)); // USI_Ponder 時に optimum へ足す % (従来の固定 25。carry と二重になるので 0 も試す)
+    // 🌈 10-19 (report/59 §15.5): 動的係数の積 M (fallingEval × reduction × bestMoveInstability × highBestMoveEffort) の振れ幅。
+    //     M を pivot × (M / pivot)^(gamma/100) に置き換える。並べ方 (どの局面に厚く配るか) は変えず、どれだけ極端に配るかだけを変える。
+    //     100 = 従来。pivot は M の幾何平均 (将棋のラベルで 1.02) の近くに置く。
+    options.add("TimeDynamicGamma", Option(100, 25, 300));
+    options.add("TimeDynamicPivot", Option(100, 10, 1000));
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -176,6 +181,8 @@ void TimeManagement::init_(const Search::LimitsType& limits,
     carry_miss_pct            = (int)options["TimeCarryMissPct"];
     ponderhit_min_from_hit    = (bool)options["PonderhitMinFromHit"];
     ponder_optimum_bonus      = (int)options["PonderOptimumBonus"];
+    dyn_gamma                 = (int)options["TimeDynamicGamma"];
+    dyn_pivot                 = (int)options["TimeDynamicPivot"];
     base_optimum              = 0;
 
 	// 今回の最大残り時間(これを超えてはならない)

@@ -1,6 +1,7 @@
 ﻿#ifndef TIMEMAN_H_INCLUDED
 #define TIMEMAN_H_INCLUDED
 
+#include <cmath>
 #include <cstdint>
 
 #include "misc.h"
@@ -41,6 +42,14 @@ class TimeManagement {
     TimePoint optimum() const;
     TimePoint maximum() const;
     TimePoint minimum() const;  // 📌 やねうら王独自追加。
+
+    // 🌈 10-19 (report/59 §15.5): 動的係数の積 m を pivot × (m / pivot)^gamma に (TimeDynamicGamma / TimeDynamicPivot、既定 100 = そのまま)。
+    double dynamic_shape(double m) const {
+        if (dyn_gamma == 100 || !(m > 0.0))
+            return m;
+        const double p = dyn_pivot / 100.0;
+        return p * std::pow(m / p, dyn_gamma / 100.0);
+    }
 
     // 🌈 #96 時間配分 (report/59): 直前の探索の root 評価値 (内部 Value、手番視点、VALUE_INFINITE = 未知) を init() の前に渡す。
     //     TimeAllocMode > 0 のとき、|e| と手数から残り手数 R(ply,|e|) と将来の重み和 M(ply,|e|) を表 (timeman_tables.h) で見積もる。
@@ -177,6 +186,8 @@ class TimeManagement {
     int       carry_hit_pct      = 0;   // 🌈 TimeCarryHitPct : go ponder で init された手 (当たれば hit) に配る carry の %
     int       carry_miss_pct     = 0;   // 🌈 TimeCarryMissPct: 通常の go (外れ / ponder 無し) の手に配る carry の %。両方 0 なら 1/N (TimeCarrySpread)
     int       ponder_optimum_bonus = 25;      // 🌈 PonderOptimumBonus: USI_Ponder 時に optimum へ足す % (従来は固定 25)
+    int       dyn_gamma          = 100;       // 🌈 TimeDynamicGamma: 動的係数の積の指数 [%] (100 = 従来)
+    int       dyn_pivot          = 100;       // 🌈 TimeDynamicPivot: その中心 [%] (M の幾何平均 ≈ 1.0)
     bool      ponderhit_min_from_hit = false; // 🌈 PonderhitMinFromHit: 最低思考時間を ponderhit から数える (相手の即指しにつられない)
     bool      carry_enabled() const { return carry_spread > 0 || carry_hit_pct > 0 || carry_miss_pct > 0; }
 
