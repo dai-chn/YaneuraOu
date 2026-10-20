@@ -80,6 +80,11 @@ void TimeManagement::add_options(OptionsMap& options) {
     //     100 = 従来。pivot は M の幾何平均 (将棋のラベルで 1.02) の近くに置く。
     options.add("TimeDynamicGamma", Option(100, 25, 300));
     options.add("TimeDynamicPivot", Option(100, 10, 1000));
+    // 🌈 10-20: 持ち時間の短い側の設定。対局開始時の自分の持ち時間 [ms] が ShortClockMaxMs 以下なら、
+    //     PonderOptimumBonus / TimeDynamicGamma の代わりに下の 2 つを使う (0 = 無効)。DR7 の先手 3 分側を想定。
+    options.add("ShortClockMaxMs", Option(0, 0, 100000000));
+    options.add("ShortPonderOptimumBonus", Option(25, 0, 100));
+    options.add("ShortTimeDynamicGamma", Option(100, 25, 300));
 }
 
 void TimeManagement::init(const Search::LimitsType& limits,
@@ -184,6 +189,18 @@ void TimeManagement::init_(const Search::LimitsType& limits,
     dyn_gamma                 = (int)options["TimeDynamicGamma"];
     dyn_pivot                 = (int)options["TimeDynamicPivot"];
     base_optimum              = 0;
+
+    // 🌈 10-20 (report/59 §15.5): 持ち時間の短い側だけ別の設定を使う (DR7 は先手 3 分 / 後手 10 分 + 2 秒の非対称)。
+    //     対局の最初の init_ (clear() の後) での自分の持ち時間 (本体 + 秒読み) で判定し、その対局の間は固定。ShortClockMaxMs 0 = 無効。
+    if (game_initial_time == 0)
+        game_initial_time = limits.time[us] + limits.byoyomi[us];
+    const int short_clock_max = (int)options["ShortClockMaxMs"];
+    short_profile = short_clock_max > 0 && game_initial_time > 0 && game_initial_time <= short_clock_max;
+    if (short_profile)
+    {
+        ponder_optimum_bonus = (int)options["ShortPonderOptimumBonus"];
+        dyn_gamma            = (int)options["ShortTimeDynamicGamma"];
+    }
 
 	// 今回の最大残り時間(これを超えてはならない)
 	// byoyomiとincの指定は残り時間にこの時点で加算して考える。
@@ -402,7 +419,7 @@ void TimeManagement::init_(const Search::LimitsType& limits,
 		          << " opt " << optimumTime << " max " << maximumTime << " min " << minimumTime << " hardmin " << hard_min
 		          << " carry " << carry_ms << " base_opt " << base_optimum << " pthink " << ponder_think_ratio
 		          << " cbonus " << carry_bonus << " hitpct " << carry_hit_pct << " misspct " << carry_miss_pct << " pbonus " << ponder_optimum_bonus
-		          << " pondermode " << limits.ponderMode << sync_endl;
+		          << " pondermode " << limits.ponderMode << " gamma " << dyn_gamma << " short " << short_profile << " init_time " << game_initial_time << sync_endl;
 	minimumTime = std::min(round_up(minimumTime), remain_time);
 	optimumTime = std::min(         optimumTime , remain_time);
 	maximumTime = std::min(round_up(maximumTime), remain_time);

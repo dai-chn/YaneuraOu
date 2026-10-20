@@ -88,7 +88,8 @@ class TimeManagement {
 
 	// 初期化。
     // 🌈　やねうら王では使わない。Stockfishとの互換性のために用意。
-    void clear() { carry_ms = 0; base_optimum = 0; }   // 🌈 繰り越し (TimeCarrySpread) は対局ごとにリセット
+    void clear() { carry_ms = 0; base_optimum = 0; game_initial_time = 0; }   // 🌈 繰り越し (TimeCarrySpread) と対局開始時の持ち時間は対局ごとにリセット
+    bool is_short_profile() const { return short_profile; }                 // 🌈 ShortClockMaxMs で短い側の設定が有効か (デバッグ表示用)
 
 #if STOCKFISH
 
@@ -188,6 +189,8 @@ class TimeManagement {
     int       ponder_optimum_bonus = 25;      // 🌈 PonderOptimumBonus: USI_Ponder 時に optimum へ足す % (従来は固定 25)
     int       dyn_gamma          = 100;       // 🌈 TimeDynamicGamma: 動的係数の積の指数 [%] (100 = 従来)
     int       dyn_pivot          = 100;       // 🌈 TimeDynamicPivot: その中心 [%] (M の幾何平均 ≈ 1.0)
+    TimePoint game_initial_time  = 0;         // 🌈 対局の最初の init_ での自分の持ち時間 (本体 + 秒読み)、clear() で 0
+    bool      short_profile      = false;     // 🌈 ShortClockMaxMs により短い側の設定を使っているか
     bool      ponderhit_min_from_hit = false; // 🌈 PonderhitMinFromHit: 最低思考時間を ponderhit から数える (相手の即指しにつられない)
     bool      carry_enabled() const { return carry_spread > 0 || carry_hit_pct > 0 || carry_miss_pct > 0; }
 
