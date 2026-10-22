@@ -205,6 +205,23 @@ elif input_feature == "halfka2t":
             Features::HalfKA2<Features::Side::kFriend>>;
     """
 
+elif input_feature == "halfka2tdf3":
+
+    # HalfKA2 + Threat + DropF3 (安全な打ち当たり、docs/superpowers/specs/2026-10-23-drop-f3-feature-design.md)。
+    # Head/Tail 規則で配置は [KA2][Threat][DropF3] = bullet 側 (ShogiHalfKa2ThreatDropF3) と一致。
+    header += f"""
+    #include "../features/half_ka2.h"
+    #include "../features/threat_ka2.h"
+    #include "../features/drop_f3.h"
+    """
+
+    raw_features = f"""
+        using RawFeatures = Features::FeatureSet<
+            Features::DropF3,
+            Features::ThreatKa2,
+            Features::HalfKA2<Features::Side::kFriend>>;
+    """
+
 elif input_feature == "halfka2te":
 
     # HalfKA2 + ThreatEffect (task#73 王者移植)。レイアウト [KA2][ThreatEffect] = bullet 側と一致。

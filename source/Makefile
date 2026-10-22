@@ -542,6 +542,10 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 			ifneq (,$(findstring _halfka2t_,$(YANEURAOU_EDITION)))
 				CPPFLAGS += -DNNUE_SFNN_HALFKA2T
 			endif
+			# halfka2tdf3 (HalfKA2 + Threat + DropF3、2026-10-23): threat の差分更新 (KEEP_LAST_MOVE) を同じく有効にする
+			ifneq (,$(findstring _halfka2tdf3_,$(YANEURAOU_EDITION)))
+				CPPFLAGS += -DNNUE_SFNN_HALFKA2TDF3
+			endif
 		endif
 	endif
 
@@ -565,6 +569,7 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 		eval/nnue/features/threat_lite.cpp                              \
 		eval/nnue/features/threat_drop2.cpp                             \
 		eval/nnue/features/threat_effect.cpp                            \
+		eval/nnue/features/drop_f3.cpp                                  \
 		engine/yaneuraou-engine/yaneuraou-search.cpp
 
 	ifneq (,$(findstring em++,$(COMPILER)))
