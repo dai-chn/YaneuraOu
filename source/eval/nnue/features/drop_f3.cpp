@@ -48,55 +48,80 @@ void DropF3::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
     if (hand == HAND_ZERO)
         return;
 
+    const Color    e       = ~c;
     const Bitboard occ     = pos.pieces();
     const Bitboard empties = pos.empties();
-    const Bitboard enemy   = pos.pieces(~c);
 
+    // v0b (10-24): 逆向きの列挙。v0 (持ち駒 × 空き升ごとに利きを出して相手駒を探す、候補 ~135/視点 + 当たりごとに attackers_to)
+    // は NPS が王者の 0.50 だった。ここでは相手の駒 (歩以外) t ごとに「p を打つと t に当たる升」= 色を反転した p の t からの利き
+    // (経路の空きは対称なので同値) を取り、打ち規則のマスクと安全性 (相手の利き集合を 1 回で作る) で絞る。
+    // 利きの計算は (持ち駒の種類数 × 相手の駒数) 回 + 相手の駒数回。
+
+    // 静的な打ちの規則: 空き升、歩は二歩と最終段 (pawn_drop_mask)、香は最終段、桂は最終 2 段を除く。
+    // 🔴 Bitboard::andnot(b) は ~this & b (SSE の andnot の向き)。禁止段を外すのは cand &= ~mask
+    //    (10-24: cand.andnot(mask) と書いていて香・桂の行が全部消えていた。合成ネットの nnuedump 照合で発見)。
+    Bitboard cand[7];
     for (int pi = 0; pi < 7; ++pi) {
         const PieceType pt = kHandOrder[pi];
-        if (!hand_exists(hand, pt))
+        if (!hand_exists(hand, pt)) {
+            cand[pi] = Bitboard(ZERO);
             continue;
-
-        // 静的な打ちの規則: 空き升、歩・香は最終段を除く、桂は最終 2 段を除く、歩は二歩を除く
-        Bitboard cand = empties;
+        }
+        Bitboard m = empties;
         if (pt == PAWN)
-            cand &= (c == BLACK) ? pawn_drop_mask<BLACK>(pos.pieces(BLACK, PAWN))
-                                 : pawn_drop_mask<WHITE>(pos.pieces(WHITE, PAWN));
-        // 🔴 Bitboard::andnot(b) は ~this & b (SSE の andnot の向き) なので cand.andnot(mask) では「空き升でない × 禁止段」になる
-        //    (10-24: 合成ネットの nnuedump 照合で香・桂の行が全部消えていた)。禁止段を外すのは cand &= ~mask。
+            m &= (c == BLACK) ? pawn_drop_mask<BLACK>(pos.pieces(BLACK, PAWN))
+                              : pawn_drop_mask<WHITE>(pos.pieces(WHITE, PAWN));
         else if (pt == LANCE)
-            cand &= ~rank1_n_bb(c, RANK_1);
+            m &= ~rank1_n_bb(c, RANK_1);
         else if (pt == KNIGHT)
-            cand &= ~rank1_n_bb(c, RANK_2);
+            m &= ~rank1_n_bb(c, RANK_2);
+        cand[pi] = m;
+    }
 
-        const Piece pc = make_piece(c, pt);
-        while (cand) {
-            const Square s = cand.pop();
-            // p を s に置いたときの利き先にある相手の駒 (長い利きは今の占有で止まる)
-            Bitboard att = effects_from(pc, s, occ) & enemy;
-            if (!att)
+    // 相手の利き集合 (玉を含む): ここに利きのある升へ打つと取られる
+#if defined(DROP_F3_NO_SAFETY)
+    // 計測用 (10-24): 安全性判定を外して相手の利き集合の計算コストを分離する。特徴の意味が変わるので判定ビルドには使わない
+    const Bitboard safe = ~Bitboard(ZERO);
+#else
+    Bitboard enemy_att(ZERO);
+    for (Bitboard bb = pos.pieces(e); bb;) {
+        const Square t = bb.pop();
+        enemy_att |= effects_from(pos.piece_on(t), t, occ);
+    }
+    const Bitboard safe = ~enemy_att;
+#endif
+
+    // (p, vc) ごとの升集合。歩には立てない (vc < 0)、玉 (vc 8) は安全性を問わない (王手の打ち = F1)
+    Bitboard rows[7][9];
+    for (auto& r : rows)
+        for (auto& b : r)
+            b = Bitboard(ZERO);
+    for (Bitboard bb = pos.pieces(e) & ~pos.pieces(e, PAWN); bb;) {
+        const Square t  = bb.pop();
+        const int    vc = target_class(type_of(pos.piece_on(t)));
+        if (vc < 0)
+            continue;
+        for (int pi = 0; pi < 7; ++pi) {
+            if (!cand[pi])
                 continue;
-            uint32_t mask = 0;
-            int safe = -1;   // 未判定
-            while (att) {
-                const Square t  = att.pop();
-                const int    vc = target_class(type_of(pos.piece_on(t)));
-                if (vc < 0)
-                    continue;                 // 歩には立てない
-                if (vc == 8) {
-                    mask |= 1u << 8;          // 王手の打ち (F1): 安全性を問わない
-                    continue;
-                }
-                if (safe < 0)
-                    safe = pos.attackers_to(~c, s) ? 0 : 1;   // s に相手の利き (玉を含む) があれば取られる
-                if (safe)
-                    mask |= 1u << vc;
-            }
-            if (!mask)
-                continue;
+            Bitboard rev = effects_from(make_piece(e, kHandOrder[pi]), t, occ) & cand[pi];
+            if (vc != 8)
+                rev &= safe;
+            if (rev)
+                rows[pi][vc] |= rev;
+        }
+    }
+
+    // 出力の順序は v0 と同じ: p 昇順 → s 昇順 (回転前の升番号) → vc 昇順。同じ (p, s, vc) は集合なので 1 回
+    for (int pi = 0; pi < 7; ++pi) {
+        Bitboard all(ZERO);
+        for (int vc = 0; vc < 9; ++vc)
+            all |= rows[pi][vc];
+        while (all) {
+            const Square s   = all.pop();
             const Square s_n = (c == BLACK) ? s : Inv(s);
             for (int vc = 0; vc < 9; ++vc)
-                if (mask & (1u << vc)) {
+                if (rows[pi][vc].test(s)) {
                     const uint32_t idx = uint32_t(pi) * 729 + uint32_t(s_n) * 9 + uint32_t(vc);
                     ASSERT_LV3(idx < kDimensions);
                     active->push_back(IndexType(idx));
