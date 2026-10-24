@@ -62,10 +62,12 @@ void DropF3::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
         if (pt == PAWN)
             cand &= (c == BLACK) ? pawn_drop_mask<BLACK>(pos.pieces(BLACK, PAWN))
                                  : pawn_drop_mask<WHITE>(pos.pieces(WHITE, PAWN));
+        // 🔴 Bitboard::andnot(b) は ~this & b (SSE の andnot の向き) なので cand.andnot(mask) では「空き升でない × 禁止段」になる
+        //    (10-24: 合成ネットの nnuedump 照合で香・桂の行が全部消えていた)。禁止段を外すのは cand &= ~mask。
         else if (pt == LANCE)
-            cand = cand.andnot(rank1_n_bb(c, RANK_1));
+            cand &= ~rank1_n_bb(c, RANK_1);
         else if (pt == KNIGHT)
-            cand = cand.andnot(rank1_n_bb(c, RANK_2));
+            cand &= ~rank1_n_bb(c, RANK_2);
 
         const Piece pc = make_piece(c, pt);
         while (cand) {
