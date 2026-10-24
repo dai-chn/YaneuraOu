@@ -112,6 +112,18 @@ void DropF3::AppendActiveIndices(const Position& pos, Color perspective, IndexLi
         }
     }
 
+#if defined(DROP_F3_NO_EMIT)
+    // 計測用 (10-24): 列挙はするが行を出さない (accumulator の行トラフィックを分離)。計算が消されないよう volatile に沈める
+    {
+        static volatile uint64_t sink;
+        uint64_t x = 0;
+        for (auto& r : rows)
+            for (auto& b : r)
+                x ^= b.merge();
+        sink = x;
+        return;
+    }
+#endif
     // 出力の順序は v0 と同じ: p 昇順 → s 昇順 (回転前の升番号) → vc 昇順。同じ (p, s, vc) は集合なので 1 回
     for (int pi = 0; pi < 7; ++pi) {
         Bitboard all(ZERO);
