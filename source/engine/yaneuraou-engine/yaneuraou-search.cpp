@@ -117,63 +117,70 @@ using namespace Eval;  // Eval::PieceValue
 	#define TUNABLE_PARAM(name, val) constexpr int name = val;
 #endif
 
+// ★2026-11-05: 以下 32 個の値は shogi-nnue #102 のローカル SPSA (王者 tsfnn-526-q128 FV 13、32 個同時、
+//   2 万局 @ 1 スレッド固定 30 万ノード、results/2026-11-03-spsa/run-p32/final.json) の θ_final。
+//   検証 θ vs 旧値 (同じ tune ビルド、600 局ずつ): 固定 1M +5.2 / 固定 4M +11.0 / 実時間 DR7 時計・両者 ponder は
+//   tmp\spsa_validate.log (SV3)。3 本とも非負でユーザ採用 (11-05)。旧値 (2026-08-14 版) は git 564ce9da 以前を参照。
+//   変わらなかった 7 個: NmpEvalDepth / NmpRDepthDiv / ProbCutImproving / CaptureSeeMarginHist / SingularBetaTtPv /
+//   IirMinDepth / IirPriorReduction。
+
 // --- cp スケール依存群 (net の出力較正に連動して最適値が動くと予想される) ---
 
 // Step 7. Razoring: eval < alpha - (base + depth_coef * depth^2) なら qsearch に落とす
-TUNABLE_PARAM(RazorMarginBase, 245)
-TUNABLE_PARAM(RazorMarginDepth, 325)
+TUNABLE_PARAM(RazorMarginBase, 236)
+TUNABLE_PARAM(RazorMarginDepth, 315)
 
 // Step 8. Futility pruning (child node)
-TUNABLE_PARAM(FutilityMultBase, 114)     // futilityMult の基準値
-TUNABLE_PARAM(FutilityMultTtMiss, 23)   // tt ヒットしなかった時の減算
-TUNABLE_PARAM(FutilityImproving, 2859)  // improving 時の margin 縮小 (/1024)
-TUNABLE_PARAM(FutilityOppWorsening, 333)  // 相手が悪化している時の margin 縮小 (/1024)
+TUNABLE_PARAM(FutilityMultBase, 96)     // futilityMult の基準値
+TUNABLE_PARAM(FutilityMultTtMiss, 24)   // tt ヒットしなかった時の減算
+TUNABLE_PARAM(FutilityImproving, 3040)  // improving 時の margin 縮小 (/1024)
+TUNABLE_PARAM(FutilityOppWorsening, 328)  // 相手が悪化している時の margin 縮小 (/1024)
 
 // Step 9. Null move pruning の発動閾値: staticEval >= beta - d*depth - i*improving + base
 TUNABLE_PARAM(NmpEvalDepth, 22)
-TUNABLE_PARAM(NmpImproving, 75)
-TUNABLE_PARAM(NmpBase, 399)
+TUNABLE_PARAM(NmpImproving, 71)
+TUNABLE_PARAM(NmpBase, 368)
 
 // aspiration window の初期幅
-TUNABLE_PARAM(AspirationDeltaBase, 9)
-TUNABLE_PARAM(AspirationDeltaDiv, 5650)
+TUNABLE_PARAM(AspirationDeltaBase, 10)
+TUNABLE_PARAM(AspirationDeltaDiv, 5317)
 
 // --- cp スケール非依存群 (枝刈り強度そのもの。NPS に効く) ---
 
 // null move の動的 reduction: R = base + depth / div
-TUNABLE_PARAM(NmpRBase, 9)
+TUNABLE_PARAM(NmpRBase, 10)
 TUNABLE_PARAM(NmpRDepthDiv, 2)
 
 // LMR reduction テーブルと reduction() の係数
-TUNABLE_PARAM(ReductionInit, 3135)          // reductions[i] = init/128.0 * log(i)
-TUNABLE_PARAM(ReductionDelta, 774)          // delta * this / rootDelta
-TUNABLE_PARAM(ReductionNotImproving, 164)   // !improving 時の増分 (/512)
-TUNABLE_PARAM(ReductionBase, 988)          // 定数項
+TUNABLE_PARAM(ReductionInit, 2967)          // reductions[i] = init/128.0 * log(i)
+TUNABLE_PARAM(ReductionDelta, 760)          // delta * this / rootDelta
+TUNABLE_PARAM(ReductionNotImproving, 158)   // !improving 時の増分 (/512)
+TUNABLE_PARAM(ReductionBase, 1029)          // 定数項
 
 // --- 第二陣 (2026-08-14 追加): やねうらお 149 値のうち、まとまった群で探索の骨格に効くもの ---
 // ★第一陣 17 個は ours +23.1 / S10 +41.2 を獲得済 (report/44 §6.9.6)。
 //   最適点は net に依存しないことが分かっているので、ここで足す分も配布版にそのまま効く見込み。
 
 // Step 16. ttPv での reduction 減算 (LMR の中核)
-TUNABLE_PARAM(PvRedTtPv, 2819)
-TUNABLE_PARAM(PvRedPvNode, 973)
-TUNABLE_PARAM(PvRedValueGtAlpha, 905)
-TUNABLE_PARAM(PvRedDepthGe, 935)
-TUNABLE_PARAM(PvRedCutNode, 959)
+TUNABLE_PARAM(PvRedTtPv, 2474)
+TUNABLE_PARAM(PvRedPvNode, 995)
+TUNABLE_PARAM(PvRedValueGtAlpha, 840)
+TUNABLE_PARAM(PvRedDepthGe, 984)
+TUNABLE_PARAM(PvRedCutNode, 973)
 
 // Step 11/12. ProbCut の margin
-TUNABLE_PARAM(ProbCutMargin, 224)
+TUNABLE_PARAM(ProbCutMargin, 227)
 TUNABLE_PARAM(ProbCutImproving, 61)
-TUNABLE_PARAM(SmallProbCutMargin, 416)
+TUNABLE_PARAM(SmallProbCutMargin, 417)
 
 // Step 14. 駒取りの SEE 枝刈り閾値
-TUNABLE_PARAM(CaptureSeeMarginDepth, 167)
+TUNABLE_PARAM(CaptureSeeMarginDepth, 169)
 TUNABLE_PARAM(CaptureSeeMarginHist, 34)
 
 // Step 15. singular extension の判定
-TUNABLE_PARAM(SingularBetaBase, 60)
+TUNABLE_PARAM(SingularBetaBase, 63)
 TUNABLE_PARAM(SingularBetaTtPv, 66)
-TUNABLE_PARAM(SingularBetaDiv, 55)
+TUNABLE_PARAM(SingularBetaDiv, 57)
 
 // Step 10. Internal Iterative Reduction
 TUNABLE_PARAM(IirMinDepth, 6)
