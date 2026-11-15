@@ -47,11 +47,19 @@ class Threat {
   // リフレッシュ不要、毎手 AppendChangedIndices で ~5.3 行/手だけ更新する。
   // (素朴全再構築は NPS 0.3988× と実測され不可 — report/51 §7.3)
   // 検証用に -DTHREAT_NAIVE_REBUILD で旧挙動 (毎手全再構築) に戻せる。
-#if defined(THREAT_NAIVE_REBUILD) || !defined(KEEP_LAST_MOVE)
-  // 差分更新は lastMove を要するため、KEEP_LAST_MOVE の無いビルドは自動で naive に落とす
+  // ★2026-09-19: 以前は「KEEP_LAST_MOVE の無いビルドは黙って naive (毎手全再構築) に落とす」だけだったが、edition 名の
+  //   文字列一致 (config.h / Makefile) から漏れると気付かずに大きく遅くなる。黙って落ちた状態を kNaiveFallback = true で申告し、
+  //   この特徴を実際に使う edition では FeatureSet 経由の static_assert (nnue_feature_transformer.h) でコンパイルエラーにする。
+  //   naive が要るなら明示的に -DTHREAT_NAIVE_REBUILD を付ける (このヘッダは全 edition でコンパイルされるので #error は使えない)。
+#if defined(THREAT_NAIVE_REBUILD)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
-#else
+  static constexpr bool kNaiveFallback = false;
+#elif defined(KEEP_LAST_MOVE)
   static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kNone;
+  static constexpr bool kNaiveFallback = false;
+#else
+  static constexpr TriggerEvent kRefreshTrigger = TriggerEvent::kAnyPieceMoved;
+  static constexpr bool kNaiveFallback = true;
 #endif
 
   // 特徴量のうち、値が 1 であるインデックスのリストを取得する

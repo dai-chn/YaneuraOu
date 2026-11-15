@@ -14,6 +14,7 @@
 #if defined(EVAL_NNUE)
 
 #include "threat_lite.h"
+#include "threat_diff.h"
 #include "index_list.h"
 #include "../../../position.h"
 #include "../../../bitboard.h"
@@ -91,12 +92,43 @@ void ThreatLite::AppendActiveIndices(const Position& pos, Color perspective, Ind
     }
 }
 
+#if defined(KEEP_LAST_MOVE) && !defined(THREAT_NAIVE_REBUILD)
+
+// 差分更新 (task#59 ②): Threat (full) の駒レベル差分をそのまま lite index に写像する。
+// ★count 意味論だから参照カウント不要: 特徴値 = 対の数なので、full 対の増減 ±1 は
+//   lite index の ±1 push (accumulator の行 ±1 回加算) に一対一対応する。
+//   removed/added に同一 lite index が現れても線形和で正しく打ち消し合う。
+void ThreatLite::AppendChangedIndices(const Position& pos, Color perspective,
+                                      IndexList* removed, IndexList* added) {
+    const ThreatPieceDiff& C = threat_piece_diff(pos);
+    for (int i = 0; i < C.n_removed; ++i) {
+        const ThreatPiecePair& pr = C.removed[i];
+        const Piece apc = Piece(pr.attacker_pc);
+        const Piece vpc = Piece(pr.victim_pc);
+        removed->push_back(IndexType(lite_index(perspective,
+            color_of(apc), lite_class_of(type_of(apc)),
+            color_of(vpc), lite_class_of(type_of(vpc)), Square(pr.victim_sq))));
+    }
+    for (int i = 0; i < C.n_added; ++i) {
+        const ThreatPiecePair& pr = C.added[i];
+        const Piece apc = Piece(pr.attacker_pc);
+        const Piece vpc = Piece(pr.victim_pc);
+        added->push_back(IndexType(lite_index(perspective,
+            color_of(apc), lite_class_of(type_of(apc)),
+            color_of(vpc), lite_class_of(type_of(vpc)), Square(pr.victim_sq))));
+    }
+}
+
+#else
+
 // kAnyPieceMoved は常に reset (= AppendActiveIndices) になるので呼ばれない
 void ThreatLite::AppendChangedIndices(const Position& pos, Color perspective,
                                       IndexList* removed, IndexList* added) {
     (void)pos; (void)perspective; (void)removed; (void)added;
     ASSERT_LV1(false);
 }
+
+#endif  // defined(KEEP_LAST_MOVE) && !defined(THREAT_NAIVE_REBUILD)
 
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu

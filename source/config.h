@@ -693,7 +693,11 @@ constexpr bool pretty_jp = false;
 
 // halfkp+threat (task#37): threat 特徴の差分更新 (AppendChangedIndices) が
 // 直前の指し手を必要とする。FOR_TOURNAMENT の #undef より後で再定義する。
-#if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32)
+// threatlite も同じ駒レベル差分 (threat_piece_diff) を使う (task#59 ②)。
+#if defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREAT_512X2_16_32) \
+	|| defined(YANEURAOU_ENGINE_NNUE_HALFKP_THREATLITE_512X2_16_32) \
+	|| defined(NNUE_SFNN_HALFKA2T)
+	// NNUE_SFNN_HALFKA2T は Makefile が edition 名 (_halfka2t_) から定義する。SFNN halfka2t の threat も差分更新に (2026-09-08)
 	#define KEEP_LAST_MOVE
 #endif
 

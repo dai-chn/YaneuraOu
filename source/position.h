@@ -82,9 +82,17 @@ struct StateInfo {
     int continuousCheck[COLOR_NB];
 #endif
 
+#if defined(SFNNwoPSQT) && defined(NNUE_SFNN_PROGRESS_BUCKETS) && NNUE_SFNN_PROGRESS_BUCKETS != 1
+	// NNUE progress bucket用の進行度計算キャッシュ。
+	Key nnue_progress_key;
+	int64_t nnue_progress_sum;
+	Square nnue_progress_sq_bk;
+	Square nnue_progress_sq_wk;
+	bool nnue_progress_valid;
+#endif
+
 
 	// 📌 ここまではdo_move()のなかでmemcpy()でコピーされる 📌
-
 
 	// Not copied when making a move (will be recomputed anyhow)
 	// 指し手で局面を進めるときにコピーされない(なんにせよ再計算される)
@@ -247,6 +255,12 @@ struct PositionSetError : std::runtime_error {
 // packされたsfen
 struct PackedSfen {
 	u8 data[32];
+
+	// 盤面を180度回転し、先後と手番を入れ替える。
+	// SFEN文字列やPosition::set()を経由せず、packed sfen上で変換する。
+	// (origin/master から移植: .ybb 定跡の FlippedBook probe 用、2026-09-10)
+	void flip();
+	PackedSfen flipped() const;
 
 	// 手番を返す。
 	Color color() const {
@@ -1381,7 +1395,6 @@ inline bool is_ok(Position& pos) { return pos.pos_is_ok(); }
 #endif
 
 // 🚧
-
 
 
 // sに利きのあるc側の駒を列挙する。

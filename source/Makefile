@@ -376,7 +376,6 @@ OBJC_SOURCES =
 ifeq (,)
 	SOURCES  +=                                                                \
 		book/makebook.cpp                                                      \
-		book/makebook2015.cpp                                                  \
 		book/makebook2025.cpp                                                  \
 		learn/learner.cpp                                                      \
 		learn/learning_tools.cpp                                               \
@@ -523,6 +522,11 @@ ifneq (,$(findstring YANEURAOU_ENGINE_NNUE,$(YANEURAOU_EDITION)))
 			# YANEURAOU_EDITIONに SFNNwoPSQT が含まれていたら、シンボル SFNNwoPSQT 定義しておく。
 			ifneq (,$(findstring YANEURAOU_ENGINE_NNUE_SFNNwoPSQT,$(YANEURAOU_EDITION)))
 				CPPFLAGS += -DSFNNwoPSQT
+			endif
+			# halfka2t (SFNN + full threat): KEEP_LAST_MOVE を有効にして threat を差分更新にする
+			# (無いと Threat は毎手全再構築に落ちる)。-DTHREAT_NAIVE_REBUILD で旧挙動。
+			ifneq (,$(findstring _halfka2t_,$(YANEURAOU_EDITION)))
+				CPPFLAGS += -DNNUE_SFNN_HALFKA2T
 			endif
 		endif
 	endif

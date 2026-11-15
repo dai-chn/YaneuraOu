@@ -41,6 +41,11 @@
 
 #include <algorithm>  // std::clamp
 #include <cstring>  // std::memset()
+#include <vector>   // NNUE_FT_INT8_ROWS のロード時一時領域
+#include <cstdio>   // std::fprintf
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+#include <x86intrin.h>  // __rdtsc (行の足し引きのサイクル計測、2026-09-18)
+#endif
 
 namespace YaneuraOu {
 namespace Eval::NNUE {
@@ -70,6 +75,24 @@ struct FtStat {
     uint64_t n_reset     = 0;   // (b) 王移動で reset された perspective 数
     uint64_t rows_full   = 0;   // (a)+(b) で読んだ行数
     uint64_t rows_inc    = 0;   // 差分で読んだ行数
+    uint64_t rows_cache  = 0;   // (c) accumulator キャッシュ (ENABLE_ACC_CACHE) との集合差分で読んだ行数
+    uint64_t n_cache_hit = 0;   // (c) キャッシュが有効だった (全再構築を差分に置き換えた) 回数
+    // 2026-09-18 (report/52 §20): 行の足し引きにかかる rdtsc サイクル (メモリ側の税の直接計測)。
+    //   差分更新の 1 行ごとに計測し、index が RawFeatures::kTailDimensions 以上 (= Head 特徴、threat 系では threat 行) と
+    //   それ未満 (Tail = KP/KA2 行) に分けて集計する。全再構築はループ全体で計測。
+    uint64_t cyc_inc_head = 0, rows_inc_head = 0;   // 差分更新: Head (threat) 行
+    uint64_t cyc_inc_tail = 0, rows_inc_tail = 0;   // 差分更新: Tail (KP/KA2) 行
+    uint64_t cyc_full     = 0;                      // 全再構築 (refresh + reset) の行加算ループ全体
+    uint64_t cyc_update   = 0;                      // update_accumulator 全体 (index 収集 + memcpy + 行加減算)
+    uint64_t cyc_collect  = 0;                      // update_accumulator 内の AppendChangedIndices (index 収集 = 列挙 + 写像) だけ
+    uint64_t cyc_refresh  = 0;                      // refresh_accumulator 全体
+    // 2026-09-18 (report/52 §23.4): 評価 (ComputeScore = Transform + 密層) 全体と、走行の経過サイクル (最初の評価から最後の評価まで)。
+    //   ノード数は呼び出し側 (go nodes N × 局面数) が知っているので、eval 外 (探索側) の 1 ノードあたりコストは
+    //   (elapsed − cyc_eval) / nodes で出す。
+    uint64_t cyc_eval     = 0, n_eval = 0;
+    uint64_t t_first_eval = 0, t_last_eval = 0;
+    // 注: 行ごとの rdtsc は非直列化命令なので OoO 実行でロード待ちが後続に付け替わり得る (下限値)。
+    //     メモリ側の税は update_total − collect で読む (行の加減算 + memcpy + キャッシュ差分の合計)。
 };
 // C++17 の inline 変数。計測用ビルドのみなので TU をまたぐ定義の手間を省く。
 // Threads=1 前提 (計測用ビルドのみ。並列では数え落とす)。
@@ -158,6 +181,12 @@ static constexpr IndexType kNumRegs = 16;
 
 #endif
 
+// ★レジスタタイル差分更新 (2026-09-18): VECTOR ビルドの既定。行ごとの計測 (ENABLE_FT_TRAFFIC_STAT) は行単位の経路が要るので
+//   従来経路 (memcpy + 行ごとに accumulator 全幅を読み書き) になる。
+#if defined(VECTOR) && !defined(ENABLE_FT_TRAFFIC_STAT)
+#define NNUE_FT_TILED
+#endif
+
 /*
  例) SFNNwop-1536のときのkNumChunksの計算
 
@@ -196,6 +225,107 @@ class FeatureTransformer {
 	using OutputType = TransformedFeatureType;
 	using BiasType   = std::int16_t;
 	using WeightType = std::int16_t;
+#if defined(NNUE_FT_INT8_ROWS)
+	// ★int8 行 (task#82 / report/52 §23.6): FT 重みを nn.bin の値 (w×127、|v| ≤ 127 に clip) のまま int8 で格納し、
+	//   従来の「ロード時 ×2 (scale_weights)」を掛けない。accumulator は従来の 1/2 スケールになり、Transform で
+	//   (a'<<8)·(c'<<1) >> 16 = a'c' >> 7 = (2a')(2c') >> 9 として従来と同じ出力を得る (|v|>127 で clip された重み以外はビット一致)。
+	//   行の読みが半分 (2 KB → 1 KB) になり、L2 帯域律速の行ループ (§23.4: update の 8 割) が軽くなる。VECTOR (AVX2/AVX-512) +
+	//   USE_ELEMENT_WISE_MULTIPLY 専用。int8 → int16 の拡張は行ロード時 (vpmovsxbw)。
+	using RowType = std::int8_t;
+	static constexpr int kFtHalfScale = 1;
+#if !defined(USE_ELEMENT_WISE_MULTIPLY) || !defined(USE_AVX2)
+#error "NNUE_FT_INT8_ROWS needs USE_ELEMENT_WISE_MULTIPLY (SFNN) and AVX2/AVX-512"
+#endif
+#else
+	using RowType = WeightType;
+	static constexpr int kFtHalfScale = 0;
+#endif
+#if defined(VECTOR)
+	// 重み行の 1 ベクトル分 (int16 × kSimdWidth/2 個) をロードする。int8 行なら符号拡張しながら。
+	static inline vec_t vec_load_row(const RowType* p) {
+#if defined(NNUE_FT_INT8_ROWS)
+#if defined(USE_AVX512)
+		return _mm512_cvtepi8_epi16(_mm256_load_si256(reinterpret_cast<const __m256i*>(p)));
+#else
+		return _mm256_cvtepi8_epi16(_mm_load_si128(reinterpret_cast<const __m128i*>(p)));
+#endif
+#else
+		return vec_load(reinterpret_cast<const vec_t*>(p));
+#endif
+	}
+	static constexpr IndexType kVecElems = sizeof(vec_t) / sizeof(BiasType);
+#endif
+
+#if defined(NNUE_FT_INT8_ROWS)
+	// ★残差表: |v| > 127 で clip した重みの差分 (v − clip(v)) を行ごとに疎に持ち、行の加減算の後に足す。
+	//   これで int16 経路とビット一致になる (halfka2t では 6,900 個 / 5,291 行、行ごと平均 1.3 個。列 398/194/171 等の少数のニューロンに
+	//   集中しているので、clip したままだと多くの局面で評価が動く: 87 局面で一致 61%、|差| 最大 44cp)。
+	//   行に残差があるかは行の先頭バイトの番兵 (−128) で見て、あれば fix_idx_ の直接参照で範囲を引く。
+	//   (FeatureTransformer は SystemWideSharedConstant に載る = 自明コピー可能でないといけないので、表は固定長配列で持つ)
+	//   ★行に残差があるかの判定は「行の先頭バイトが −128 (clip 範囲 ±127 に無い番兵)」で行う。行データは行ループが読んだばかりで
+	//   キャッシュにあるので判定はほぼ無料 (別のビット表を引く版は表がキャッシュから追い出されて 1 update 630 cycles = NPS −8% だった)。
+	//   番兵にした先頭要素の本当の値は残差表の col 0 に (delta = v0 + 128) 入れる。
+	struct FixEntry { std::uint16_t col; std::int16_t delta; };
+	static constexpr std::size_t kMaxFixRows = std::size_t(1) << 16, kMaxFix = std::size_t(1) << 17;
+	static constexpr RowType kFixSentinel = RowType(-128);
+	std::uint32_t fix_idx_[RawFeatures::kDimensions]; // 行 index → 残差ブロック番号 k (残差の無い行は未使用)
+	std::uint32_t fix_start_[kMaxFixRows + 1];       // ブロック k の残差 = fix_[fix_start_[k] .. fix_start_[k+1])
+	FixEntry      fix_[kMaxFix];
+	std::uint32_t n_fix_rows_ = 0, n_fix_ = 0;
+	// 行内の格納位置 col → その行が足される accumulator 上の位置
+	inline IndexType fix_acc_pos(IndexType index, IndexType col) const {
+		(void)index;
+		return col;
+	}
+	// 残差のある行だけが来る遅い経路 (疎な加減算)。行ループの codegen を汚さないよう noinline。
+	template <bool kAdd>
+	__attribute__((noinline)) void fix_row_slow(BiasType* acc, IndexType index) const {
+		const std::size_t k = fix_idx_[index];
+		for (std::uint32_t e = fix_start_[k]; e < fix_start_[k + 1]; ++e) {
+			const IndexType pos = fix_acc_pos(index, fix_[e].col);
+			acc[pos] = static_cast<BiasType>(kAdd ? acc[pos] + fix_[e].delta : acc[pos] - fix_[e].delta);
+		}
+	}
+	template <bool kAdd>
+	inline void fix_row(BiasType* acc, IndexType index) const {
+		if (__builtin_expect(weights_[row_off(index)] == kFixSentinel, 0))
+			fix_row_slow<kAdd>(acc, index);
+	}
+#else
+	template <bool kAdd>
+	inline void fix_row(BiasType*, IndexType) const {}
+#endif
+
+#if defined(ENABLE_ACC_CACHE)
+	// ★accumulator キャッシュ ("Finny table"、task#50 / report/52 §18.13)
+	//   玉移動トリガ (kFriendKingMoved) の slot は玉が動くたびに全再構築 (HalfKP で ~39 行/視点) になる。
+	//   視点 × 自玉升ごとに「その時の accumulator と active index (ソート済)」を thread_local に覚えておき、
+	//   次に同じ玉升で全再構築が要るときはキャッシュとの集合差分 (removed/added の数行) で作る。
+	//   特徴集合の種類に依らず index 列だけで動くので HalfKP / HalfKA2 共通。整数加算の順序非依存性により
+	//   結果はビット一致 (探索一致で確認)。ネットを読み直したら generation で無効化する。
+	struct AccCacheEntry {
+		alignas(kCacheLineSize) BiasType accumulation[kHalfDimensions];
+		IndexType indices[RawFeatures::kMaxActiveDimensions];
+		std::uint16_t n = 0;
+		bool valid = false;
+	};
+	struct AccCache {
+		AccCacheEntry e[COLOR_NB][SQ_NB];   // [視点][その視点の自玉升]
+		std::uint32_t generation = 0;
+		void clear() { for (auto& row : e) for (auto& ent : row) ent.valid = false; }
+	};
+	static AccCache& acc_cache() {
+		static thread_local AccCache cache;
+		return cache;
+	}
+#endif
+
+	// task#87 (2026-09-19): この edition が使う特徴が「差分更新の前提 define (KEEP_LAST_MOVE) を欠いて
+	// 黙って毎手全再構築に落ちている」ならコンパイルエラーにする (黙って遅くなる事故の再発防止)。naive が要るなら
+	// -DTHREAT_NAIVE_REBUILD を明示する。
+	static_assert(!RawFeatures::kNaiveFallback,
+	              "a threat-family feature of this edition silently falls back to naive full rebuild: "
+	              "define KEEP_LAST_MOVE for this edition in config.h, or pass -DTHREAT_NAIVE_REBUILD explicitly");
 
 	// Number of input/output dimensions
 	// 入出力の次元数
@@ -209,6 +339,66 @@ class FeatureTransformer {
 	// Size of forward propagation buffer
 	// 順伝播用バッファのサイズ
 	static constexpr std::size_t kBufferSize = kOutputDimensions * sizeof(OutputType);
+
+	static constexpr IndexType kBiasSlot = 0;
+	static constexpr std::size_t kWeightsCount = std::size_t(kHalfDimensions) * kInputDimensions;
+	static constexpr IndexType slot_width(IndexType /*slot*/) { return kHalfDimensions; }
+
+	// タイル更新 (NNUE_FT_TILED) の対象 slot か (全 slot)。
+	static constexpr bool tiled_slot(IndexType /*slot*/) { return true; }
+#if defined(NNUE_FT_TILED)
+	// ★レジスタタイル差分更新 (task#82、report/52 §23): accumulator を kNumRegs × vec_t のタイル (AVX2: 16 × 16 = 256 値 = 512 B)
+	//   に分け、タイルをレジスタに載せたまま removed/added の全行のそのタイル部分を加減算してから 1 回だけ書き戻す。
+	//   従来 (memcpy + 行ごとに accumulator 全幅を読み書き) は行 1 本あたり「acc 読み + acc 書き + 行読み」= 3 × 幅 の
+	//   トラフィックだったのが「行読み」= 1 × 幅 になる。src = 出発点 (前局面の accumulator / バイアス / nullptr = 0)。
+	//   整数の加減算は順序に依らないので結果はビット一致 (探索一致で確認)。
+	inline void apply_rows_tiled(BiasType* acc, const BiasType* src, IndexType width,
+	                             const IndexType* rem, std::size_t n_rem,
+	                             const IndexType* add, std::size_t n_add) const {
+		constexpr IndexType kChunk = sizeof(vec_t) / sizeof(BiasType);
+		constexpr IndexType kTile  = kNumRegs * kChunk;
+#if defined(NNUE_FT_INT8_ROWS)
+		// 残差のある行 (先頭バイトが番兵) をタイルループの前に拾う。この読みは行の先頭ラインの prefetch を兼ねる。
+		IndexType frem[RawFeatures::kMaxActiveDimensions], fadd[RawFeatures::kMaxActiveDimensions];
+		std::size_t nfr = 0, nfa = 0;
+		for (std::size_t r = 0; r < n_rem; ++r) if (__builtin_expect(weights_[row_off(rem[r])] == kFixSentinel, 0)) frem[nfr++] = rem[r];
+		for (std::size_t r = 0; r < n_add; ++r) if (__builtin_expect(weights_[row_off(add[r])] == kFixSentinel, 0)) fadd[nfa++] = add[r];
+#endif
+		IndexType j = 0;
+		for (; j + kTile <= width; j += kTile) {
+			vec_t regs[kNumRegs];
+			if (src) {
+				const vec_t* s = reinterpret_cast<const vec_t*>(src + j);
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_load(&s[k]);
+			} else {
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_zero();
+			}
+			for (std::size_t r = 0; r < n_rem; ++r) {
+				const RowType* col = &weights_[row_off(rem[r]) + j];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_sub_16(regs[k], vec_load_row(col + k * kChunk));
+			}
+			for (std::size_t r = 0; r < n_add; ++r) {
+				const RowType* col = &weights_[row_off(add[r]) + j];
+				for (IndexType k = 0; k < kNumRegs; ++k) regs[k] = vec_add_16(regs[k], vec_load_row(col + k * kChunk));
+			}
+			vec_t* d = reinterpret_cast<vec_t*>(acc + j);
+			for (IndexType k = 0; k < kNumRegs; ++k) vec_store(&d[k], regs[k]);
+		}
+		// 端数 (幅がタイルの倍数でないとき): チャンク単位
+		for (; j < width; j += kChunk) {
+			vec_t v = src ? vec_load(reinterpret_cast<const vec_t*>(src + j)) : vec_zero();
+			for (std::size_t r = 0; r < n_rem; ++r)
+				v = vec_sub_16(v, vec_load_row(&weights_[row_off(rem[r]) + j]));
+			for (std::size_t r = 0; r < n_add; ++r)
+				v = vec_add_16(v, vec_load_row(&weights_[row_off(add[r]) + j]));
+			vec_store(reinterpret_cast<vec_t*>(acc + j), v);
+		}
+#if defined(NNUE_FT_INT8_ROWS)
+		for (std::size_t k = 0; k < nfr; ++k) fix_row_slow<false>(acc, frem[k]);
+		for (std::size_t k = 0; k < nfa; ++k) fix_row_slow<true>(acc, fadd[k]);
+#endif
+	}
+#endif
 
 #if defined(NNUE_FT_SCRELU)
 	// SCReLU ネット識別マーカー。exp013 trainer の SCRELU_HASH_MARKER /
@@ -249,6 +439,16 @@ class FeatureTransformer {
 	// Read network parameters
 	// パラメータを読み込む
 	Tools::Result ReadParameters(std::istream& stream) {
+#if defined(ENABLE_ACC_CACHE)
+		++load_generation_;   // 重みが変わるので各スレッドの accumulator キャッシュを無効化する
+#endif
+#if defined(NNUE_FT_INT8_ROWS)
+		// int16 で読んで並び替えてから int8 へ落とす (一時領域 kWeightsCount × 2 B)
+		std::vector<WeightType> wtmp(kWeightsCount);
+		WeightType* const wdst = wtmp.data();
+#else
+		[[maybe_unused]] WeightType* const wdst = weights_;
+#endif
 #if defined(NNUE_FT_PAIRWISE)
 		// exp013 arm3 pairwise: trainer は SavedFormat::quantise::<i16> = raw little-endian を出力。
 		// SFNNwoPSQT の LEB128 形式とは異なるため、pairwise は標準 CReLU と同じ raw 読み出し。
@@ -259,22 +459,67 @@ class FeatureTransformer {
 		// nnue_eval.py --verify (意図クオンタイズ: raw weight, clamp254, >>9) で 1:1 一致を確認済み。
 		for (std::size_t i = 0; i < kHalfDimensions; ++i) biases_[i] = read_little_endian<BiasType>(stream);
 		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
-			weights_[i] = read_little_endian<WeightType>(stream);
+			wdst[i] = read_little_endian<WeightType>(stream);
 #if defined(VECTOR)
-		permute_weights(inverse_order_packs);
+		permute_weights(inverse_order_packs, wdst);
 #endif
 #elif defined(USE_ELEMENT_WISE_MULTIPLY)
 		read_leb_128<BiasType>(stream, biases_, kHalfDimensions);
-		read_leb_128<WeightType>(stream, weights_, kHalfDimensions * kInputDimensions);
+		read_leb_128<WeightType>(stream, wdst, kHalfDimensions * kInputDimensions);
 
 #if defined(VECTOR)
-		permute_weights(inverse_order_packs);
+		permute_weights(inverse_order_packs, wdst);
 #endif
+#if !defined(NNUE_FT_INT8_ROWS)
 		scale_weights(true);
+#endif
 #else
 		for (std::size_t i = 0; i < kHalfDimensions; ++i) biases_[i] = read_little_endian<BiasType>(stream);
 		for (std::size_t i = 0; i < kHalfDimensions * kInputDimensions; ++i)
-			weights_[i] = read_little_endian<WeightType>(stream);
+			wdst[i] = read_little_endian<WeightType>(stream);
+#endif
+#if defined(NNUE_FT_INT8_ROWS)
+		if (!stream.fail()) {
+			// nn.bin の値 (w×127) をそのまま int8 に。|v| > 127 は clip し、差分を残差表に (配布ネットでは 357M 個のうち 6,900 個 = 0.002%)。
+			std::size_t clipped = 0;
+			for (std::size_t i = 0; i < kWeightsCount; ++i) {
+				const int v = wtmp[i];
+				const int c = v > 127 ? 127 : (v < -127 ? -127 : v);
+				clipped += std::size_t(c != v);
+				weights_[i] = static_cast<RowType>(c);
+			}
+			n_fix_rows_ = 0; n_fix_ = 0;
+			for (IndexType r = 0; r < kInputDimensions; ++r) {
+				const std::size_t base = row_off(r);
+				const IndexType width = kHalfDimensions;
+				bool any = false;
+				for (IndexType c = 0; c < width; ++c) {
+					const int v = wtmp[base + c];
+					if (v > 127 || v < -127) {
+						if (n_fix_ + 2 > kMaxFix || n_fix_rows_ >= kMaxFixRows) {
+							std::fprintf(stderr, "Error! NNUE_FT_INT8_ROWS: residual table overflow (rows %u, entries %u)\n", n_fix_rows_, n_fix_);
+							return Tools::ResultCode::FileReadError;
+						}
+						if (!any) {
+							// この行は残差あり: 先頭要素を番兵 −128 にし、その本当の値 v0 (clip 済み) との差を col 0 の残差として先に積む
+							any = true;
+							fix_idx_[r] = n_fix_rows_; fix_start_[n_fix_rows_] = n_fix_; ++n_fix_rows_;
+							const int v0 = wtmp[base];
+							const int c0 = v0 > 127 ? 127 : (v0 < -127 ? -127 : v0);
+							fix_[n_fix_++] = FixEntry{std::uint16_t(0), std::int16_t(v0 - int(kFixSentinel))};
+							weights_[base] = kFixSentinel;
+							if (c == 0) continue;   // col 0 の残差は上で (clip 分も込みで) 積んだ
+							(void)c0;
+						}
+						fix_[n_fix_++] = FixEntry{std::uint16_t(c), std::int16_t(v - (v > 127 ? 127 : -127))};
+					}
+				}
+			}
+			fix_start_[n_fix_rows_] = n_fix_;
+			if (clipped)
+				std::fprintf(stderr, "NNUE_FT_INT8_ROWS: %llu of %llu weights beyond [-127, 127] -> int8 + residual table (%u rows)\n",
+				             (unsigned long long)clipped, (unsigned long long)kWeightsCount, n_fix_rows_);
+		}
 #endif
 		return !stream.fail() ? Tools::ResultCode::Ok : Tools::ResultCode::FileReadError;
 	}
@@ -282,10 +527,22 @@ class FeatureTransformer {
 	// Write network parameters
 	// パラメータを書き込む
 	bool WriteParameters(std::ostream& stream) const {
+#if defined(NNUE_FT_INT8_ROWS)
+		// 並び替え済み配置 / int8 格納の保存は未対応 (標準 pair-major へ逆置換していないため、
+		// このまま書くと他ビルドで読めない nn.bin ができる)。学習系はこのビルドで使わないこと。
+		return false;
+#else
 		stream.write(reinterpret_cast<const char*>(biases_), kHalfDimensions * sizeof(BiasType));
 		stream.write(reinterpret_cast<const char*>(weights_), kHalfDimensions * kInputDimensions * sizeof(WeightType));
 		return !stream.fail();
+#endif
 	}
+
+	// 特徴 index → 重み行列内オフセット。
+	static inline IndexType row_off(IndexType index) {
+		return kHalfDimensions * index;
+	}
+
 
 	// Proceed with the difference calculation if possible
 	// 可能なら差分計算を進める
@@ -326,7 +583,7 @@ class FeatureTransformer {
 		constexpr IndexType NumOutputChunks = kHalfDimensions / 2 / OutputChunkSize;
 
 		vec_t Zero = vec_zero();
-		vec_t One = vec_set_16(127 * 2);
+		vec_t One = vec_set_16(kFtHalfScale ? 127 : 127 * 2);   // int8 行では acc が半スケール
 
 		const Color perspectives[2] = { pos.side_to_move(), ~pos.side_to_move() };
 		for (IndexType p = 0; p < 2; ++p) {
@@ -334,9 +591,9 @@ class FeatureTransformer {
 
 			// ★複数 refresh trigger (halfka2t 等) では平面を全て合算する。
 			//   平面 0 固定読みだと threat 等の追加平面が出力に乗らない (task#54 で実害)。
+			vec_t* out = reinterpret_cast<vec_t*>(output + offset);
 			const vec_t* in0 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][0][0]));
 			const vec_t* in1 = reinterpret_cast<const vec_t*>(&(accumulation[perspectives[p]][0][kHalfDimensions / 2]));
-			vec_t* out = reinterpret_cast<vec_t*>(output + offset);
 			auto load0 = [&](IndexType idx) {
 				vec_t v = in0[idx];
 				for (IndexType t = 1; t < kRefreshTriggers.size(); ++t)
@@ -352,11 +609,12 @@ class FeatureTransformer {
 				return v;
 			};
 
+			// int8 行 (kFtHalfScale): a', c' は従来の 1/2 なので (a'<<(s+1))·(c'<<1) >> 16 = (2a')(2c') >> (16−s) で従来と一致
 			constexpr int shift =
 #if defined(USE_SSE2)
-				7;
+				7 + kFtHalfScale;
 #else
-				6;
+				6 + kFtHalfScale;
 #endif
 
 			for (IndexType j = 0; j < NumOutputChunks; ++j)
@@ -365,8 +623,9 @@ class FeatureTransformer {
 					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 0), One), Zero), shift);
 				const vec_t sum0b =
 					vec_slli_16(vec_max_16(vec_min_16(load0(j * 2 + 1), One), Zero), shift);
-				const vec_t sum1a = vec_min_16(load1(j * 2 + 0), One);
-				const vec_t sum1b = vec_min_16(load1(j * 2 + 1), One);
+				vec_t sum1a = vec_min_16(load1(j * 2 + 0), One);
+				vec_t sum1b = vec_min_16(load1(j * 2 + 1), One);
+				if constexpr (kFtHalfScale) { sum1a = vec_slli_16(sum1a, 1); sum1b = vec_slli_16(sum1b, 1); }
 
 				const vec_t pa = vec_mulhi_16(sum0a, sum1a);
 				const vec_t pb = vec_mulhi_16(sum0b, sum1b);
@@ -389,9 +648,9 @@ class FeatureTransformer {
 					sum0 += accumulation[perspectives[p]][t][j];
 					sum1 += accumulation[perspectives[p]][t][j + kHalfDimensions / 2];
 				}
-				sum0 = std::clamp<BiasType>(sum0, 0, 127 * 2);
-				sum1 = std::clamp<BiasType>(sum1, 0, 127 * 2);
-				output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / 512);
+				sum0 = std::clamp<BiasType>(sum0, 0, kFtHalfScale ? 127 : 127 * 2);
+				sum1 = std::clamp<BiasType>(sum1, 0, kFtHalfScale ? 127 : 127 * 2);
+				output[offset + j] = static_cast<OutputType>(unsigned(sum0 * sum1) / (kFtHalfScale ? 128 : 512));
 			}
 
 		}
@@ -418,7 +677,7 @@ class FeatureTransformer {
 		constexpr IndexType kNumChunks = kHalfDimensions / kSimdWidth;
 #if defined(USE_SSE41)
 		const __m128i kZero = _mm_setzero_si128();
-#else  // SSE41非対応だがSSE2は使える環境
+#else
 		const __m128i k0x80s = _mm_set1_epi8(-128);
 #endif
 
@@ -502,7 +761,7 @@ class FeatureTransformer {
 				_mm_store_si128(&out[j],
 #if defined(USE_SSE41)
 				                _mm_max_epi8(packedbytes, kZero)
-#else  // SSE41非対応だがSSE2は使える環境
+#else
 				                _mm_subs_epi8(_mm_adds_epi8(packedbytes, k0x80s), k0x80s)
 #endif
 				);
@@ -583,7 +842,8 @@ class FeatureTransformer {
 #endif
 	}
 
-	void permute_weights([[maybe_unused]] void (*order_fn)(uint64_t*)) const {
+	// wts = 並び替える int16 の重み配列 (通常は weights_、NNUE_FT_INT8_ROWS ではロード時の int16 一時領域)
+	void permute_weights([[maybe_unused]] void (*order_fn)(uint64_t*), [[maybe_unused]] WeightType* wts) const {
 #if defined(USE_AVX2)
 #if defined(USE_AVX512)
 		constexpr IndexType di = 16;
@@ -596,8 +856,7 @@ class FeatureTransformer {
 
 		for (IndexType j = 0; j < kInputDimensions; ++j)
 		{
-			uint64_t* w =
-				reinterpret_cast<uint64_t*>(const_cast<WeightType*>(&weights_[j * kHalfDimensions]));
+			uint64_t* w = reinterpret_cast<uint64_t*>(&wts[std::size_t(j) * kHalfDimensions]);
 			for (IndexType i = 0; i < kHalfDimensions * sizeof(WeightType) / sizeof(uint64_t);
 					i += di)
 				order_fn(&w[i]);
@@ -605,56 +864,82 @@ class FeatureTransformer {
 #endif
 	}
 
+#if !defined(NNUE_FT_INT8_ROWS)
 	inline void scale_weights(bool read) const {
-		for (IndexType j = 0; j < kInputDimensions; ++j)
-		{
-			WeightType* w = const_cast<WeightType*>(&weights_[j * kHalfDimensions]);
-			for (IndexType i = 0; i < kHalfDimensions; ++i)
-				w[i] = read ? w[i] * 2 : w[i] / 2;
-		}
+		// 全要素一様なので配列全体を走査する
+		WeightType* w = const_cast<WeightType*>(weights_);
+		for (std::size_t i = 0; i < kWeightsCount; ++i)
+			w[i] = read ? w[i] * 2 : w[i] / 2;
 
 		BiasType* b = const_cast<BiasType*>(biases_);
 		for (IndexType i = 0; i < kHalfDimensions; ++i)
 			b[i] = read ? b[i] * 2 : b[i] / 2;
 	}
+#endif
 
 	// Calculate cumulative value without using difference calculation
 	// 差分計算を用いずに累積値を計算する
 	void refresh_accumulator(const Position& pos) const {
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		const uint64_t t_ref0 = __rdtsc();
+		struct RefreshTimer { uint64_t t0; ~RefreshTimer() { g_ft_stat.cyc_refresh += __rdtsc() - t0; } } t_ref_timer{t_ref0};
+#endif
 		auto& accumulator = pos.state()->accumulator;
 		for (IndexType i = 0; i < kRefreshTriggers.size(); ++i) {
 			Features::IndexList active_indices[2];
 			RawFeatures::AppendActiveIndices(pos, kRefreshTriggers[i], active_indices);
 #if defined(ENABLE_FT_TRAFFIC_STAT)
 			if (i == 0) g_ft_stat.n_refresh++;
-			g_ft_stat.rows_full += active_indices[BLACK].size() + active_indices[WHITE].size();
 #endif
 			for (Color perspective : {BLACK, WHITE}) {
-#if defined(VECTOR)
-				if (i == 0) {
-					std::memcpy(accumulator.accumulation[perspective][i], biases_, kHalfDimensions * sizeof(BiasType));
-				} else {
-					std::memset(accumulator.accumulation[perspective][i], 0, kHalfDimensions * sizeof(BiasType));
+#if defined(ENABLE_ACC_CACHE)
+				if (kRefreshTriggers[i] == Features::TriggerEvent::kFriendKingMoved) {
+					build_from_cache(perspective, pos.square<KING>(perspective), active_indices[perspective],
+					                 accumulator.accumulation[perspective][i], i == kBiasSlot);
+					continue;
 				}
-				for (const auto index : active_indices[perspective]) {
-					const IndexType offset = kHalfDimensions * index;
-					auto accumulation      = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
-					auto column            = reinterpret_cast<const vec_t*>(&weights_[offset]);
-					constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
-					for (IndexType j = 0; j < kNumChunks; ++j) {
-						accumulation[j] = vec_add_16(accumulation[j], column[j]);
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+				g_ft_stat.rows_full += active_indices[perspective].size();
+				const uint64_t t_full0 = __rdtsc();
+#endif
+#if defined(VECTOR)
+#if defined(NNUE_FT_TILED)
+				if (tiled_slot(i)) {
+					apply_rows_tiled(&accumulator.accumulation[perspective][i][0], i == kBiasSlot ? biases_ : nullptr, slot_width(i),
+					                 nullptr, 0, active_indices[perspective].begin(), active_indices[perspective].size());
+				} else
+#endif
+				{
+					if (i == kBiasSlot) {
+						std::memcpy(accumulator.accumulation[perspective][i], biases_, kHalfDimensions * sizeof(BiasType));
+					} else {
+						std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
+					}
+					for (const auto index : active_indices[perspective]) {
+						const IndexType offset = row_off(index);
+						auto accumulation      = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
+						const RowType* column  = &weights_[offset];
+						const IndexType kNumChunks = slot_width(i) / kVecElems;
+						for (IndexType j = 0; j < kNumChunks; ++j) {
+							accumulation[j] = vec_add_16(accumulation[j], vec_load_row(column + j * kVecElems));
+						}
+						fix_row<true>(&accumulator.accumulation[perspective][i][0], index);
 					}
 				}
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+				g_ft_stat.cyc_full += __rdtsc() - t_full0;
+#endif
 #else
-				if (i == 0) {
+				if (i == kBiasSlot) {
 					std::memcpy(accumulator.accumulation[perspective][i], biases_, kHalfDimensions * sizeof(BiasType));
 				} else {
-					std::memset(accumulator.accumulation[perspective][i], 0, kHalfDimensions * sizeof(BiasType));
+					std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 				}
 				for (const auto index : active_indices[perspective]) {
-					const IndexType offset = kHalfDimensions * index;
+					const IndexType offset = row_off(index);
 
-					for (IndexType j = 0; j < kHalfDimensions; ++j) {
+					for (IndexType j = 0; j < slot_width(i); ++j) {
 						accumulator.accumulation[perspective][i][j] += weights_[offset + j];
 					}
 				}
@@ -670,48 +955,95 @@ class FeatureTransformer {
 	// Calculate cumulative value using difference calculation
 	// 差分計算を用いて累積値を計算する
 	void update_accumulator(const Position& pos) const {
-		const auto prev_accumulator = pos.state()->previous->accumulator;
-		auto&      accumulator      = pos.state()->accumulator;
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		const uint64_t t_upd0 = __rdtsc();
+#endif
+		// ★参照 (2026-09-18): 従来は値コピーで accumulator 構造体 (全 slot × 両視点、8 KB 超) を update のたびに丸写ししていた
+		const auto& prev_accumulator = pos.state()->previous->accumulator;
+		auto&       accumulator      = pos.state()->accumulator;
 		for (IndexType i = 0; i < kRefreshTriggers.size(); ++i) {
 			Features::IndexList removed_indices[2], added_indices[2];
 			bool                reset[2];
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			const uint64_t t_col0 = __rdtsc();
+#endif
 			RawFeatures::AppendChangedIndices(pos, kRefreshTriggers[i], removed_indices, added_indices, reset);
 #if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.cyc_collect += __rdtsc() - t_col0;
 			if (i == 0) g_ft_stat.n_update++;
 			for (Color pc : {BLACK, WHITE}) {
 				const uint64_t rows = removed_indices[pc].size() + added_indices[pc].size();
 				// ★reset は王移動。added が全 active になるので「全再構築」に数える
-				if (reset[pc]) { g_ft_stat.n_reset++; g_ft_stat.rows_full += rows; }
+				//   (ENABLE_ACC_CACHE で玉移動 slot がキャッシュ経由になるときは rows_cache 側で数える)
+				if (reset[pc]) {
+					g_ft_stat.n_reset++;
+#if defined(ENABLE_ACC_CACHE)
+					if (kRefreshTriggers[i] != Features::TriggerEvent::kFriendKingMoved)
+#endif
+					g_ft_stat.rows_full += rows;
+				}
 				else           { g_ft_stat.rows_inc += rows; }
 			}
 #endif
 			for (Color perspective : {BLACK, WHITE}) {
+#if defined(ENABLE_ACC_CACHE)
+				// 玉移動 slot の reset = 全 active (added_indices に入っている) をキャッシュとの集合差分で作る
+				if (reset[perspective] && kRefreshTriggers[i] == Features::TriggerEvent::kFriendKingMoved) {
+					build_from_cache(perspective, pos.square<KING>(perspective), added_indices[perspective],
+					                 accumulator.accumulation[perspective][i], i == kBiasSlot);
+					continue;
+				}
+#endif
+#if defined(NNUE_FT_TILED)
+				if (tiled_slot(i)) {
+					BiasType* out = &accumulator.accumulation[perspective][i][0];
+					if (reset[perspective])
+						apply_rows_tiled(out, i == kBiasSlot ? biases_ : nullptr, slot_width(i), nullptr, 0,
+						                 added_indices[perspective].begin(), added_indices[perspective].size());
+					else
+						apply_rows_tiled(out, &prev_accumulator.accumulation[perspective][i][0], slot_width(i),
+						                 removed_indices[perspective].begin(), removed_indices[perspective].size(),
+						                 added_indices[perspective].begin(), added_indices[perspective].size());
+					continue;
+				}
+#endif
 #if defined(VECTOR)
-				constexpr IndexType kNumChunks = kHalfDimensions / (sizeof(vec_t) / sizeof(BiasType));
-				auto accumulation              = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
+				const IndexType kNumChunks = slot_width(i) / (sizeof(vec_t) / sizeof(BiasType));
+				auto accumulation          = reinterpret_cast<vec_t*>(&accumulator.accumulation[perspective][i][0]);
 #endif
 				if (reset[perspective]) {
-					if (i == 0) {
+					if (i == kBiasSlot) {
 						std::memcpy(accumulator.accumulation[perspective][i], biases_,
 						            kHalfDimensions * sizeof(BiasType));
 					} else {
-						std::memset(accumulator.accumulation[perspective][i], 0, kHalfDimensions * sizeof(BiasType));
+						std::memset(accumulator.accumulation[perspective][i], 0, slot_width(i) * sizeof(BiasType));
 					}
 				} else {
 					// Difference calculation for the feature amount changed from 1 to 0
 					// 1から0に変化した特徴量に関する差分計算
 					std::memcpy(accumulator.accumulation[perspective][i], prev_accumulator.accumulation[perspective][i],
-					            kHalfDimensions * sizeof(BiasType));
+					            slot_width(i) * sizeof(BiasType));
 					for (const auto index : removed_indices[perspective]) {
-						const IndexType offset = kHalfDimensions * index;
+						const IndexType offset = row_off(index);
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						const uint64_t t_row0 = __rdtsc();
+#endif
 #if defined(VECTOR)
-						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+						const RowType* column = &weights_[offset];
 						for (IndexType j = 0; j < kNumChunks; ++j) {
-							accumulation[j] = vec_sub_16(accumulation[j], column[j]);
+							accumulation[j] = vec_sub_16(accumulation[j], vec_load_row(column + j * kVecElems));
 						}
+						fix_row<false>(&accumulator.accumulation[perspective][i][0], index);
 #else
-						for (IndexType j = 0; j < kHalfDimensions; ++j) {
+						for (IndexType j = 0; j < slot_width(i); ++j) {
 							accumulator.accumulation[perspective][i][j] -= weights_[offset + j];
+						}
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						{
+							const uint64_t dt = __rdtsc() - t_row0;
+							if (index >= RawFeatures::kTailDimensions) { g_ft_stat.cyc_inc_head += dt; g_ft_stat.rows_inc_head++; }
+							else                                       { g_ft_stat.cyc_inc_tail += dt; g_ft_stat.rows_inc_tail++; }
 						}
 #endif
 					}
@@ -720,26 +1052,137 @@ class FeatureTransformer {
 					// Difference calculation for features that changed from 0 to 1
 					// 0から1に変化した特徴量に関する差分計算
 					for (const auto index : added_indices[perspective]) {
-						const IndexType offset = kHalfDimensions * index;
+						const IndexType offset = row_off(index);
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						const uint64_t t_row0 = __rdtsc();
+#endif
 #if defined(VECTOR)
-						auto column = reinterpret_cast<const vec_t*>(&weights_[offset]);
+						const RowType* column = &weights_[offset];
 						for (IndexType j = 0; j < kNumChunks; ++j) {
-							accumulation[j] = vec_add_16(accumulation[j], column[j]);
+							accumulation[j] = vec_add_16(accumulation[j], vec_load_row(column + j * kVecElems));
 						}
+						fix_row<true>(&accumulator.accumulation[perspective][i][0], index);
 #else
-						for (IndexType j = 0; j < kHalfDimensions; ++j) {
+						for (IndexType j = 0; j < slot_width(i); ++j) {
 							accumulator.accumulation[perspective][i][j] += weights_[offset + j];
+						}
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+						{
+							const uint64_t dt = __rdtsc() - t_row0;
+							if (reset[perspective]) { g_ft_stat.cyc_full += dt; }
+							else if (index >= RawFeatures::kTailDimensions) { g_ft_stat.cyc_inc_head += dt; g_ft_stat.rows_inc_head++; }
+							else                                            { g_ft_stat.cyc_inc_tail += dt; g_ft_stat.rows_inc_tail++; }
 						}
 #endif
 					}
 				}
 			}
 		}
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+		g_ft_stat.cyc_update += __rdtsc() - t_upd0;
+#endif
 
 		accumulator.computed_accumulation = true;
 		// Stockfishでは fc27d15(2020-09-07) にcomputed_scoreが排除されているので確認
 		accumulator.computed_score = false;
 	}
+
+#if defined(ENABLE_ACC_CACHE)
+	// 1 行の加算/減算 (キャッシュ差分用)
+	inline void add_row(BiasType* acc, IndexType index) const {
+		const IndexType offset = row_off(index);
+#if defined(VECTOR)
+		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
+		auto a = reinterpret_cast<vec_t*>(acc);
+		const RowType* column = &weights_[offset];
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_add_16(a[j], vec_load_row(column + j * kVecElems));
+#else
+		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] += weights_[offset + j];
+#endif
+		fix_row<true>(acc, index);
+	}
+	inline void sub_row(BiasType* acc, IndexType index) const {
+		const IndexType offset = row_off(index);
+#if defined(VECTOR)
+		constexpr IndexType kNumChunks = kHalfDimensions / kVecElems;
+		auto a = reinterpret_cast<vec_t*>(acc);
+		const RowType* column = &weights_[offset];
+		for (IndexType j = 0; j < kNumChunks; ++j) a[j] = vec_sub_16(a[j], vec_load_row(column + j * kVecElems));
+#else
+		for (IndexType j = 0; j < kHalfDimensions; ++j) acc[j] -= weights_[offset + j];
+#endif
+		fix_row<false>(acc, index);
+	}
+
+	// active (未ソート、この視点の玉移動 slot の全 active index) から out を作る。
+	// キャッシュ [perspective][ksq] が有効ならその accumulator との集合差分、無効なら通常の全加算。
+	// 作った結果と active をキャッシュに書き戻す。with_bias = slot 0 (バイアスを含む) かどうか。
+	void build_from_cache(Color perspective, Square ksq, Features::IndexList& active, BiasType* out,
+	                      bool with_bias) const {
+		AccCache& C = acc_cache();
+		if (C.generation != load_generation_) {
+			C.clear();
+			C.generation = load_generation_;
+		}
+		AccCacheEntry& ent = C.e[perspective][ksq];
+		std::sort(active.begin(), active.end());
+		if (!ent.valid) {
+#if defined(NNUE_FT_TILED)
+			apply_rows_tiled(out, with_bias ? biases_ : nullptr, kHalfDimensions, nullptr, 0, active.begin(), active.size());
+#else
+			if (with_bias)
+				std::memcpy(out, biases_, kHalfDimensions * sizeof(BiasType));
+			else
+				std::memset(out, 0, kHalfDimensions * sizeof(BiasType));
+			for (const auto index : active) add_row(out, index);
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.rows_full += active.size();
+#endif
+		} else {
+			// ソート済み多重集合の差分 (merge walk): キャッシュにあって今無い → 減算、今あってキャッシュに無い → 加算
+			std::size_t a = 0, b = 0;
+			const std::size_t na = ent.n, nb = active.size();
+			[[maybe_unused]] uint64_t applied = 0;
+#if defined(NNUE_FT_TILED)
+			IndexType rem[RawFeatures::kMaxActiveDimensions], add[RawFeatures::kMaxActiveDimensions];
+			std::size_t n_rem = 0, n_add = 0;
+			while (a < na || b < nb) {
+				if (b >= nb || (a < na && ent.indices[a] < active[b])) {
+					rem[n_rem++] = ent.indices[a]; ++a; ++applied;
+				} else if (a >= na || active[b] < ent.indices[a]) {
+					add[n_add++] = active[b]; ++b; ++applied;
+				} else {
+					++a; ++b;
+				}
+			}
+			apply_rows_tiled(out, ent.accumulation, kHalfDimensions, rem, n_rem, add, n_add);
+#else
+			std::memcpy(out, ent.accumulation, kHalfDimensions * sizeof(BiasType));
+			while (a < na || b < nb) {
+				if (b >= nb || (a < na && ent.indices[a] < active[b])) {
+					sub_row(out, ent.indices[a]); ++a; ++applied;
+				} else if (a >= na || active[b] < ent.indices[a]) {
+					add_row(out, active[b]); ++b; ++applied;
+				} else {
+					++a; ++b;
+				}
+			}
+#endif
+#if defined(ENABLE_FT_TRAFFIC_STAT)
+			g_ft_stat.rows_cache += applied;
+			g_ft_stat.n_cache_hit++;
+#endif
+		}
+		std::memcpy(ent.accumulation, out, kHalfDimensions * sizeof(BiasType));
+		for (std::size_t k = 0; k < active.size(); ++k) ent.indices[k] = active[k];
+		ent.n = static_cast<std::uint16_t>(active.size());
+		ent.valid = true;
+	}
+
+	mutable std::uint32_t load_generation_ = 1;
+#endif
 
 	// parameter type
 	// パラメータの型
@@ -751,7 +1194,8 @@ class FeatureTransformer {
 	// parameter
 	// パラメータ
 	alignas(kCacheLineSize) BiasType biases_[kHalfDimensions];
-	alignas(kCacheLineSize) WeightType weights_[kHalfDimensions * kInputDimensions];
+	// NNUE_FT_INT8_ROWS では int8 (nn.bin の値そのまま、半スケール)、通常は int16 (ロード時 ×2 済)
+	alignas(kCacheLineSize) RowType weights_[kWeightsCount];
 };
 
 } // namespace Eval::NNUE

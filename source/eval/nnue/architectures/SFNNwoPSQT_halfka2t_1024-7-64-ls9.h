@@ -33,6 +33,10 @@ namespace Eval::NNUE {
     // Number of networks stored in the evaluation file
     constexpr int LayerStacks = 9;
 
+    #define NNUE_SFNN_HAND_BUCKETS 1
+    #define NNUE_SFNN_KING_BUCKETS 9
+    #define NNUE_SFNN_PROGRESS_BUCKETS 1
+
     // 各層の次元数
     constexpr IndexType kInputDims   = kTransformedFeatureDimensions;
 // fc_0 の重みスケールビット (6=QB64 従来 / 7=QB128, report/51 §7.7)。-DNNUE_SFNN_L1_SCALE_BITS=7 で切替
